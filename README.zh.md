@@ -1,6 +1,6 @@
 # dsh-plugin-model-governor
 
-DSH 模型治理面（纯服务端，无浏览器 UI）：逐模型思考强度覆盖（含自带值读出）、服务商/模型两级 RPM 排队、OpenCode 会话头兼容、错误翻译。行为全部经 `settings.yaml` / 治理配置切片配置，没有设置页 UI。
+DSH 模型治理面：每张服务商卡片一行 RPM（只排队、不拒单）、逐模型思考强度覆盖（含自带值读出）、OpenCode 会话头兼容、错误翻译。行为全部经 `settings.yaml` / 治理配置切片配置；设置页 UI 仅每卡一行 RPM。
 
 ## 功能
 
@@ -43,7 +43,7 @@ dsh plugin --profile <your-profile> add ./path/to/dsh-plugin-model-governor
 
 ## 界面
 
-无——本包不带浏览器半，经 `settings.yaml` 配置（见上文配置节）。
+设置 → 模型每张卡片只多一行（`RPM 上限` + 数字框 + `应用`），此外什么都没有——无标题、无徽标、无页脚区。空=不限。其余经 `settings.yaml` 配置（见上文配置节）。
 
 ## 致谢
 

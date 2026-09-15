@@ -1,6 +1,6 @@
 # dsh-plugin-model-governor
 
-DSH model governance plane (server-only, no browser UI): per-model thinking-intensity overrides with builtin readout, provider/model two-level RPM queueing, OpenCode session-header compat, and actionable error translation. All behavior is configured via `settings.yaml` / the governor config slice; there is no settings-page UI.
+DSH model governance plane: one RPM line per provider card (never rejects, only delays), per-model thinking-intensity overrides with builtin readout, OpenCode session-header compat, and actionable error translation. All behavior is configured via `settings.yaml` / the governor config slice; the only settings-page UI is the per-card RPM row.
 
 ## Features
 
@@ -43,7 +43,7 @@ The plugin row lives in the profile's `cordis.patch.yml` (or the bundle default,
 
 ## GUI
 
-None — this package ships no browser half. Configure via `settings.yaml` (see Configure above).
+One line per provider card on Settings → Models (`RPM 上限` + number box + `应用`); nothing else — no titles, badges, or footer panels. Empty input = unlimited. Configure via `settings.yaml` (see Configure above).
 
 ## Credits
 
