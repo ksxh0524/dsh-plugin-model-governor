@@ -2,7 +2,7 @@
   "name": "dsh-plugin-model-governor",
   "version": "0.1.0",
   "type": "module",
-  "description": "DSH model governance plane: per-model thinking-intensity overrides with builtin readout, provider/model two-level RPM queueing (never rejects, only delays), OpenCode session-header compat, actionable error translation. UI extends the host Models page in place.",
+  "description": "DSH model governance plane (server-only, no browser UI): per-model thinking-intensity overrides with builtin readout, provider/model two-level RPM queueing (never rejects, only delays), OpenCode session-header compat, actionable error translation.",
   "keywords": [
     "dsh",
     "deepseek-harness",
@@ -22,12 +22,10 @@
   "main": "src/cordis.ts",
   "exports": {
     ".": "./src/cordis.ts",
-    "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
   "files": [
     "src",
-    "lib",
     "tests",
     "cordis.patch.yml",
     "README.md",
@@ -37,13 +35,6 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
-    },
-    "client": {
-      "inject": [
-        "@deepseek-ai/dsh-api-remotes",
-        "@deepseek-ai/dsh-client-ui-settings"
-      ],
-      "platform": "web"
     }
   },
   "devDependencies": {
