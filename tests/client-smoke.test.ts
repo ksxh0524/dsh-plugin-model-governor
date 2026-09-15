@@ -1,11 +1,15 @@
-/** client-smoke.test.ts —— RPM 单行冒烟（无头、无 DOM，全桩）：
+/** client-smoke.test.ts —— RPM 单行 + 探测行冒烟（无头、无 DOM，全桩）：
  *  用最小 React 桩驱动 lib/client.js 真 apply() 接线，断言：
- *  ① 只注册 provider-card keyed 槽（key=llm-pi-ai），绝不注册 footer；
- *  ② RpmLine 渲染出 “RPM 上限 + 数字框 + 应用” 单行（读数取首模型生效 rpm）；
- *  ③ 改框点应用调 configure({limits:{providers:{[route]:{rpm}}}})，空输入无操作。
+ *  ① 只注册 provider-card keyed 槽（llm-pi-ai/llm-deepseek 各一位），绝不注册 footer；
+ *  ② RpmLine 渲染出 “RPM 上限 + 数字框 + 应用 + 清除” 单行（读数取首模型生效 rpm）；
+ *  ③ 改框点应用调 configure({limits:{providers:{[route]:{rpm}}}})，空输入无操作；
+ *     点清除调 configure({…:{rpm:null}}) 并回读空；
+ *  ④ ProbeLine 渲染出“探测”行：点探测 → probe 发起 → probeStatus 结论直显。
  *
  *  桩说明：react 不在 dependencies（浏览器半只 require("react") 宿主供给），此处手写桩；
- *  useEffect 收集后手动 flush（含异步 describe 的 macrotask 排空）。 */
+ *  useEffect 收集后手动 flush（含异步 describe 的 macrotask 排空）。
+ *  跨行事件（window CustomEvent）在桩 window 上不存在：emitRpmChanged/订阅均有守卫，
+ *  冒烟不断跨行联动（真浏览器覆盖），只断各行本体。 */
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -73,6 +77,8 @@ function findAll(node: any, pred: (n: any) => boolean, out: any[] = []): any[] {
   return out;
 }
 function textOf(node: any): string {
+  // 卡槽渲染多孩子时 GvrBoundary 透出数组根：数组必须展开（曾吞成 ""，探测行加入后才暴露）。
+  if (Array.isArray(node)) return node.map(textOf).join("");
   if (typeof node === "string") return node;
   if (node === null || node === undefined || typeof node !== "object") return "";
   return ((node.renderedChildren ?? node.props?.children ?? []) as any[]).map(textOf).join("");
@@ -109,8 +115,16 @@ const plugin = (factory as unknown as Factory)(pluginRequire);
 /* ---------- 桩 ctx ---------- */
 const regs: Array<{ name: string; options: any; render: any }> = [];
 const injectedSlots: string[] = [];
-const calls: { describe: any[]; configure: any[] } = { describe: [], configure: [] };
+const calls: { describe: any[]; configure: any[]; probe: any[]; probeStatus: any[]; cancelProbe: any[] } = {
+  describe: [],
+  configure: [],
+  probe: [],
+  probeStatus: [],
+  cancelProbe: [],
+};
 let rpmValue: number | undefined = 60;
+/** 桩 probeStatus 的剧本（用例按需改写：running 态或 done 结论）。 */
+let probeStatusScript: any = { state: "running", sent: 3, succeeded: 3, rateLimited: 0 };
 const ctxStub: any = {
   remote: { $mount: () => Promise.resolve({}) },
   get: (name: string) => {
@@ -123,8 +137,20 @@ const ctxStub: any = {
       configure: async (p: any) => {
         calls.configure.push(p);
         const rpm = p?.limits?.providers ? (Object.values(p.limits.providers)[0] as any) : undefined;
-        if (rpm && typeof rpm.rpm === "number") rpmValue = rpm.rpm;
+        if (rpm && "rpm" in rpm) rpmValue = typeof rpm.rpm === "number" ? rpm.rpm : undefined;
         return { ok: true, applied: ["limits"], errors: [] };
+      },
+      probe: async (s: any) => {
+        calls.probe.push(s);
+        return { ok: true, started: { probeId: "pb-1", provider: s.provider, model: "m" }, errors: [] };
+      },
+      probeStatus: async (f: any) => {
+        calls.probeStatus.push(f);
+        return probeStatusScript;
+      },
+      cancelProbe: async (t: any) => {
+        calls.cancelProbe.push(t);
+        return { ok: true, cancelled: true, errors: [] };
       },
     };
   },
@@ -142,11 +168,11 @@ const ctxStub: any = {
 };
 plugin.apply(ctxStub);
 
-test("注册面：只挂 provider-card keyed 槽，无 footer", () => {
+test("注册面：只挂 provider-card keyed 槽（两命名空间各一位），无 footer", () => {
   assert.deepEqual(injectedSlots, ["settings.models.provider-card"]);
-  assert.equal(regs.length, 1);
-  assert.equal(regs[0].name, "settings.models.provider-card");
-  assert.equal(regs[0].options.key, "llm-pi-ai");
+  assert.equal(regs.length, 2);
+  for (const reg of regs) assert.equal(reg.name, "settings.models.provider-card");
+  assert.deepEqual(regs.map((r) => r.options.key).sort(), ["llm-deepseek", "llm-pi-ai"]);
 });
 
 test("渲染：RPM 单行（标签+数字框+应用），读数=首模型生效 rpm", async () => {
@@ -197,4 +223,74 @@ test("写入：改框点应用 → configure 服务商 rpm；空输入无操作"
   findAll(tree3, (n) => n.type === "button")[0].props.onClick();
   await flush();
   assert.equal(calls.configure.length, 0);
+});
+
+test("渲染：探测行（探测按钮 + 说明）与 RPM 行清除按钮", async () => {
+  resetHooks();
+  render(regs[0].render({ provider: { provider: "opencode" } }));
+  await flush();
+  resetHooks();
+  const tree = render(regs[0].render({ provider: { provider: "opencode" } }));
+  const probeRoots = findAll(tree, (n) => n.props?.className === "gvr-probe");
+  assert.equal(probeRoots.length, 1);
+  const probeBtns = findAll(tree, (n) => n.type === "button" && textOf(n) === "探测");
+  assert.equal(probeBtns.length, 1);
+  assert.ok(textOf(tree).includes("自动测 RPM 并填入"));
+  const clearBtns = findAll(tree, (n) => n.type === "button" && textOf(n) === "清除");
+  assert.equal(clearBtns.length, 1);
+});
+
+test("写入：点清除 → configure 写 null 删服务商 rpm 并回读空", async () => {
+  rpmValue = 77;
+  calls.configure.length = 0;
+  render(regs[0].render({ provider: { provider: "opencode" } }));
+  await flush();
+  resetHooks();
+  const tree = render(regs[0].render({ provider: { provider: "opencode" } }));
+  const clearBtn = findAll(tree, (n) => n.type === "button" && textOf(n) === "清除")[0];
+  clearBtn.props.onClick();
+  await flush();
+  assert.equal(calls.configure.length, 1);
+  assert.deepEqual(calls.configure[0], { limits: { providers: { opencode: { rpm: null } } } });
+  resetHooks();
+  const treeDone = render(regs[0].render({ provider: { provider: "opencode" } }));
+  assert.equal(findAll(treeDone, (n) => n.type === "input")[0].props.value, "", "清除后回读应为空（回落上层=不限）");
+});
+
+test("探测：点探测 → probe 发起 → 结论直显", async () => {
+  // 回收组件起的轮询 timer，防测试进程悬挂。
+  const timers: unknown[] = [];
+  const g = globalThis as any;
+  const realSetInterval = g.setInterval;
+  g.setInterval = (fn: (...args: unknown[]) => void, ms: number) => {
+    const handle = realSetInterval(fn, ms);
+    timers.push(handle);
+    return handle;
+  };
+  try {
+    probeStatusScript = {
+      state: "done",
+      result: { topped: true, estimate: 60, lowerBound: 60, applied: true, appliedRpm: 60, note: "测得约 60 RPM，已自动填入" },
+    };
+    calls.probe.length = 0;
+    calls.probeStatus.length = 0;
+    resetHooks();
+    render(regs[0].render({ provider: { provider: "opencode" } }));
+    await flush();
+    resetHooks();
+    const tree = render(regs[0].render({ provider: { provider: "opencode" } }));
+    findAll(tree, (n) => n.type === "button" && textOf(n) === "探测")[0].props.onClick();
+    await flush();
+    assert.equal(calls.probe.length, 1);
+    assert.deepEqual(calls.probe[0], { provider: "opencode" });
+    assert.ok(calls.probeStatus.length >= 1);
+    resetHooks();
+    const done = render(regs[0].render({ provider: { provider: "opencode" } }));
+    assert.ok(textOf(done).includes("测得约 60 RPM，已自动填入"), "结论 note 应直显");
+    assert.equal(findAll(done, (n) => n.type === "button" && textOf(n) === "重测").length, 1);
+  } finally {
+    for (const handle of timers.splice(0)) g.clearInterval(handle);
+    g.setInterval = realSetInterval;
+    probeStatusScript = { state: "running", sent: 3, succeeded: 3, rateLimited: 0 };
+  }
 });

@@ -1,13 +1,13 @@
 # dsh-plugin-model-governor
 
-DSH model governance plane: one RPM line per provider card (never rejects, only delays), per-model thinking-intensity overrides with builtin readout, OpenCode session-header compat, and actionable error translation. All behavior is configured via `settings.yaml` / the governor config slice; the only settings-page UI is the per-card RPM row.
+DSH model governance plane: one RPM line per provider card (never rejects, only delays), RPM probing with auto-apply, plus OpenCode session-header compat. All behavior is configured via `settings.yaml` / the governor config slice; the settings-page UI is the per-card RPM row and probe row.
 
 ## Features
 
-- **Thinking-intensity overrides**: each model card shows the builtin档位 (efforts/default, read from the installed catalog) and lets you override per model (`reasoningEfforts` spelling map, non-reasoning flag, route default). Empty override = follow builtin. Mismatched ids surface as repairable issues instead of silent no-ops.
 - **RPM queueing (never rejects)**: `limits.defaults` → provider default → model override, merged per dimension (RPM / TPM / concurrency). When tokens run out the call waits locally (FIFO) instead of hitting the remote and eating a 429. Waiting never counts toward `maxRetries`; abort cancels the wait.
+- **RPM probing (auto-apply when topped)**: per-card `Probe` button fires tiny requests (`maxTokens: 1`) in two phases — sequential single-flight first (small limits conclude in seconds without ever touching concurrency walls), then doubling parallel bursts (large quotas approached via cumulative successes). Only a topped run (watched a 429: N accepted, N+1 rejected) is auto-written to the provider-level RPM — demonstrated fact, not inference. Untopped / failed / cancelled runs write nothing and keep unlimited. One flight per provider; cancellable anytime.
 - **OpenCode session header**: ports `dsh-opencode-session` (nobu121, MIT — see Credits) natively: attaches `x-opencode-session` to OpenCode-provider requests, fixing 400 MissingSessionID and keeping prompt-cache affinity.
-- **Error translation**: `UNKNOWN_MODEL` / `UNSUPPORTED_REASONING_EFFORT` / `RATE_LIMIT` become actionable messages (what id, where to fix). Auto-fallback to another model is deliberately out of scope (single-route rule).
+- **Outcome hook (reserved)**: every request reports success/failure exactly once to `noteOutcome` — the seam where a future circuit breaker (and per-code handling UI) will plug in. Currently collects signals only, never alters the stream.
 
 ## Install
 
@@ -39,11 +39,15 @@ The plugin row lives in the profile's `cordis.patch.yml` (or the bundle default,
           mode: session-id
 ```
 
-`models` keys are `"provider/model"`. Effective value per dimension = model → provider → defaults (tightest wins at runtime: both the provider bucket and the provider/model bucket must grant a token).
+`models` keys are `"provider/model"`. Effective value per dimension = model → provider → defaults (tightest wins at runtime: both the provider bucket and the provider/model bucket must grant a token). Write `null` for a dimension to delete the override and fall back upward (e.g. `{ limits: { providers: { buzz: { rpm: null } } } }`).
+
+## Probe
+
+`probe({ provider, model?, phaseA?, bursts?, confirmPauseMs?, confirmCount?, staggerMs?, maxRequests?, durationMs? })` starts a background run and returns immediately; poll `probeStatus({ provider })`, cancel with `cancelProbe({ provider })`. Defaults: `phaseA: 15`, `bursts: [8, 16, 32]`, `maxRequests: 150`, `durationMs: 120000`. Probe traffic bypasses the local limiter (it measures the remote, not itself) and is reported to `noteOutcome` like any other call. Quota exhaustion (`QUOTA`) stops the run and is never written as an RPM.
 
 ## GUI
 
-One line per provider card on Settings → Models (`RPM 上限` + number box + `应用`); nothing else — no titles, badges, or footer panels. Empty input = unlimited. Configure via `settings.yaml` (see Configure above).
+Two lines per provider card on Settings → Models: the RPM row (`RPM 上限` + number box + `应用` + `清除`) and the probe row (`探测` + progress/cancel + one-line verdict); nothing else — no titles, badges, or footer panels. Empty input = unlimited. Configure via `settings.yaml` (see Configure above).
 
 ## Credits
 

@@ -8,7 +8,10 @@
  *   还是全禁？），写路径由 validateConfigPatch 拦下；读路径 normalizeConfig 丢弃非有限
  *   数字，保证流到 limiter 的都是干净数字。
  * - 优先级 `model > provider > defaults`，且三维（rpm / tpm / maxConcurrent）各自独立
- *   合并：模型级只需覆盖它关心的那一维，其余维继续向上继承。
+ *   合并：模型级只需覆盖它关心的那一维，其余维继续向上继承。provider 桶另有
+ *   `effectiveProviderLimits`（整条线路口径，不掺模型级）。
+ * - 删除语义：补丁里某维写 `null` 即删掉已设值、回落上层（校验放行，合并后由
+ *   `deleteNullLeaves` 落定；归一层同样丢弃 null，live 配置里永不出现 null）。
  * - models 表键形固定为 `"provider/model"`（与 effectiveLimits 的查表键一致）；键形错误
  *   只在 validateConfigPatch 里逐条中文报错，normalize / effective 层不抛（查不到即不限）。
  */
@@ -65,7 +68,8 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
-/** 归一单个维度表：只收有限数字，其余（字符串 / NaN / Infinity / 对象）丢弃即不限。 */
+/** 归一单个维度表：只收有限数字，其余（字符串 / NaN / Infinity / 对象）丢弃即不限。
+ *  `null` 视为删除标记同样丢弃（configure 删除语义在本层即收敛，live 配置里永不出现 null）。 */
 function normalizeDims(value: unknown): LimitDims {
   const out: LimitDims = {};
   if (!isPlainObject(value)) return out;
@@ -147,14 +151,15 @@ function validateDims(value: unknown, path: string, errors: string[]): void {
   }
   for (const dim of DIM_KEYS) {
     const v: unknown = value[dim as string];
-    if (v === undefined) continue;
+    // null = 删除该维（configure 删除语义：删掉已设值、回落上层；归一层同样丢弃）。
+    if (v === undefined || v === null) continue;
     const label = `${path}.${dim}`;
     if (typeof v !== "number" || !Number.isFinite(v)) {
-      errors.push(`${label} 必须是有限数字（当前值：${fmt(v)}）`);
+      errors.push(`${label} 必须是有限数字，删除该维请传 null（当前值：${fmt(v)}）`);
       continue;
     }
     if (v <= 0) {
-      errors.push(`${label} 必须大于 0，不限流请直接省略该字段（当前值：${fmt(v)}）`);
+      errors.push(`${label} 必须大于 0，不限流请直接省略该字段，删除已设值请传 null（当前值：${fmt(v)}）`);
     }
   }
 }
@@ -265,4 +270,34 @@ export function effectiveLimits(cfg: GovernorConfig, provider: string, model: st
     if (v !== undefined) out[key] = v;
   }
   return out;
+}
+
+/** 查某 provider 整条线路的生效限流：provider → defaults（provider 桶的执法口径）。
+ *
+ * 设计意图：provider 桶统计的是该服务商**所有模型**的流量，执法必须用整条线路的
+ * 口径；若误用某对 pair 的生效值（如模型 A 的 rpm:10），其他模型的流量会被连带
+ * 卡死（2026-09-16 审查发现，见 cordis 监听器）。模型桶仍用 effectiveLimits。 */
+export function effectiveProviderLimits(cfg: GovernorConfig, provider: string): LimitDims {
+  const limits: GovernorLimits | undefined = isPlainObject(cfg) ? (cfg as GovernorConfig).limits : undefined;
+  const defaults: LimitDims = limits?.defaults ?? {};
+  const byProvider: LimitDims = limits?.providers?.[provider] ?? {};
+  const out: LimitDims = {};
+  for (const key of DIM_KEYS) {
+    const v: number | undefined = byProvider[key] ?? defaults[key];
+    if (v !== undefined) out[key] = v;
+  }
+  return out;
+}
+
+/** 删除合并后配置里的 null 叶（configure 删除语义的第二步：merge 把 null 落盘后，
+ *  本函数就地删掉 null 叶；空对象保留（即不限流），调用方传入的须是合并产出的全新对象）。 */
+export function deleteNullLeaves(value: unknown): void {
+  if (!isPlainObject(value)) return;
+  for (const [key, child] of Object.entries(value)) {
+    if (child === null) {
+      delete value[key];
+    } else if (isPlainObject(child)) {
+      deleteNullLeaves(child);
+    }
+  }
 }

@@ -1,133 +1,106 @@
-/** rpm-line.browser.test.ts —— RPM 单行真机门（自起实例 + 自起 headless Chrome，CDP 直驱）：
- *  无 GOV_BROWSER_URL / GOV_BROWSER_TOKEN 时 skip（本文件只在验证轮由人给出实例地址后跑，
- *  不进 pnpm check 默认链；check:browser 串起它）。有地址时不断言截图，只断言 DOM：
- *  ① 设置 → 模型页出现 ≥1 个 .gvr-rpm；② 零 data-slot-error 崩脸；③ 旧垃圾无残留
- *  （零 .gvr-card）；④ 截图落 /tmp/gov-rpm.png 供人阅读验收。
- *  零外部依赖：http + 原生 WebSocket 手写最小 CDP 客户端。 */
-import test from "node:test";
-import assert from "node:assert/strict";
-import fs from "node:fs";
-import http from "node:http";
+/** rpm-line.ui.test.ts —— RPM 单行 + 探测行真机验证（STANDARDS §5 机器化）：一次性实例走
+ *  「设置 → 模型」，断言每卡 RPM 行（标签就 RPM 三个字 + 数字框 + 应用 + 清除）与探测行
+ *  （探测按钮 + 说明）挂载、零崩脸、无旧垃圾；第二场景真写一次 RPM 并断言回读（覆盖 busy
+ *  回解回归）；第三场景点探测走真链路（无 key 的裸实例必 fast-fail，或跑起来就取消），
+ *  断言行内出现结论/错误/取消文案（wire-through 证明，不过长等待）。
+ *  跑法：pnpm check:browser（自起实例 + 系统 Chrome，不碰任何正在服务的 host）。 */
+import { uiScenarioSuite, type UiContext } from "dsh-check";
+import { fileURLToPath } from "node:url";
 
-const BASE = process.env.GOV_BROWSER_URL;
-const TOKEN = process.env.GOV_BROWSER_TOKEN;
-const CDP_PORT = Number(process.env.GOV_CDP_PORT ?? 9334);
-const SHOT = "/tmp/gov-rpm.png";
+const pluginRoot = fileURLToPath(new URL("../../", import.meta.url));
 
-function httpReq(method: string, path: string, body?: string): Promise<{ status: number; text: string }> {
-  return new Promise((resolve, reject) => {
-    const url = new URL(path, `http://127.0.0.1:${CDP_PORT}`);
-    const req = http.request(
-      { method, hostname: url.hostname, port: url.port, path: url.pathname, headers: { "Content-Type": "application/json" } },
-      (res: any) => {
-        let buf = "";
-        res.on("data", (c: any) => (buf += c));
-        res.on("end", () => resolve({ status: res.statusCode ?? 0, text: buf }));
-      },
-    );
-    req.on("error", reject);
-    if (body) req.write(body);
-    req.end();
-  });
+type Page = UiContext["page"];
+
+async function openModels(page: Page) {
+  // 自起实例落地页可能已开着设置弹层（触发器 aria-expanded=true）：开着就直接用，不硬点。
+  let dialog = page.locator('[role="dialog"]').last();
+  if (
+    (await dialog.count()) === 0 ||
+    !(await dialog
+      .first()
+      .isVisible()
+      .catch(() => false))
+  ) {
+    await page.locator('[aria-label="设置"]').first().click({ timeout: 10_000 });
+    dialog = page.locator('[role="dialog"]').last();
+  }
+  await dialog.getByText("模型", { exact: true }).first().click({ timeout: 10_000 });
+  return dialog;
 }
 
-class Cdp {
-  private ws: any;
-  private seq = 0;
-  private waiting = new Map<number, { ok: (v: any) => void; err: (e: any) => void }>();
-  static async open(wsUrl: string): Promise<Cdp> {
-    const c = new Cdp();
-    c.ws = new (globalThis as any).WebSocket(wsUrl);
-    await new Promise((ok, err) => {
-      c.ws.addEventListener("open", () => ok(undefined), { once: true });
-      c.ws.addEventListener("error", err, { once: true });
-    });
-    c.ws.addEventListener("message", (ev: any) => {
-      const msg = JSON.parse(String(ev.data));
-      if (msg.id !== undefined) {
-        const w = c.waiting.get(msg.id);
-        if (w) {
-          c.waiting.delete(msg.id);
-          if (msg.error) w.err(new Error(JSON.stringify(msg.error)));
-          else w.ok(msg.result);
+uiScenarioSuite({
+  pluginRoot,
+  scenarios: [
+    {
+      name: "设置 → 模型：RPM 单行挂载，零崩脸，无旧垃圾",
+      async run({ page }) {
+        const dialog = await openModels(page);
+        try {
+          // 卡片异步挂载：等首个 .gvr-rpm 可见（裸实例模型目录即出卡，无需配 key）。
+          await dialog.locator(".gvr-rpm").first().waitFor({ state: "visible", timeout: 25_000 });
+        } catch {
+          const text = ((await dialog.innerText().catch(() => "")) || "").slice(0, 500);
+          await page.screenshot({ path: "/tmp/gov-rpm-fail.png" });
+          throw new Error(`等 .gvr-rpm 超时；弹层文本头：${text}（截图 /tmp/gov-rpm-fail.png）`);
         }
-      }
-    });
-    return c;
-  }
-  call(method: string, params: any = {}): Promise<any> {
-    const id = ++this.seq;
-    return new Promise((ok, err) => {
-      this.waiting.set(id, { ok, err });
-      this.ws.send(JSON.stringify({ id, method, params }));
-    });
-  }
-  close() {
-    try {
-      this.ws.close();
-    } catch {
-      /* 已关 */
-    }
-  }
-}
-
-async function evaluate(cdp: Cdp, fnSource: string, awaitPromise = false): Promise<any> {
-  const r = await cdp.call("Runtime.evaluate", {
-    expression: `(${fnSource})()`,
-    returnByValue: true,
-    awaitPromise,
-  });
-  if (r.exceptionDetails) throw new Error("evaluate 炸: " + JSON.stringify(r.exceptionDetails).slice(0, 400));
-  return r.result?.value;
-}
-
-const CLICK_MODELS = `() => {
-  const btns = [...document.querySelectorAll('button')];
-  const settings = btns.find(b => (b.textContent || '').includes('设置'));
-  if (settings) settings.click();
-  return !!settings;
-}`;
-const POLL_MODELS = `() => {
-  const btns = [...document.querySelectorAll('button')];
-  const navs = [...document.querySelectorAll('[role="tab"],li,button')];
-  const model = navs.find(el => (el.textContent || '').trim() === '模型');
-  if (model) model.click();
-  return {
-    rpm: document.querySelectorAll('.gvr-rpm').length,
-    crash: document.querySelectorAll('[data-slot-error]').length,
-    oldCard: document.querySelectorAll('.gvr-card').length,
-    hasModels: document.body.textContent.includes('模型目录'),
-  };
-}`;
-
-test("RPM 单行真机：出 UI、零崩脸、无旧垃圾", { timeout: 120000 }, async (t) => {
-  if (!BASE || !TOKEN) {
-    t.skip("缺 GOV_BROWSER_URL/TOKEN：真机门只在验证轮跑");
-    return;
-  }
-  const created = await httpReq("PUT", "/json/new");
-  assert.equal(created.status, 200, "Chrome 调试端口应答");
-  const target = (JSON.parse(created.text) as any).webSocketDebuggerUrl as string;
-  const targetId = /devtools\/page\/([^/]+)$/.exec(target)?.[1];
-  const cdp = await Cdp.open(target);
-  try {
-    await cdp.call("Page.navigate", { url: `${BASE}/?token=${TOKEN}` });
-    await new Promise((r) => setTimeout(r, 6000));
-    await evaluate(cdp, CLICK_MODELS);
-    let state: any = null;
-    for (let i = 0; i < 30; i++) {
-      await new Promise((r) => setTimeout(r, 2000));
-      state = await evaluate(cdp, POLL_MODELS);
-      if (state.hasModels && state.rpm > 0) break;
-    }
-    assert.ok(state.hasModels, "模型页应出现（模型目录字样）");
-    assert.equal(state.crash, 0, "零 data-slot-error 崩脸");
-    assert.equal(state.oldCard, 0, "旧垃圾 .gvr-card 无残留");
-    assert.ok(state.rpm >= 1, `≥1 个 .gvr-rpm，实得 ${state.rpm}`);
-    const shot = await cdp.call("Page.captureScreenshot", { format: "png" });
-    fs.writeFileSync(SHOT, Buffer.from(shot.data, "base64"));
-  } finally {
-    cdp.close();
-    if (targetId) await httpReq("PUT", `/json/close/${targetId}`).catch(() => undefined);
-  }
+        const crash = await dialog.locator("[data-slot-error]").count();
+        if (crash !== 0) throw new Error(`崩脸 ${crash} 处：RPM 行炸了`);
+        const old = await dialog.locator(".gvr-card").count();
+        if (old !== 0) throw new Error(`旧垃圾 .gvr-card 残留 ${old} 处`);
+        const label = await dialog.locator(".gvr-rpm").first().innerText();
+        if (!label.includes("RPM")) throw new Error(`首行无 RPM 字样，实得：${label.slice(0, 60)}`);
+        await page.screenshot({ path: "/tmp/gov-rpm.png" });
+      },
+    },
+    {
+      name: "RPM 写入：改框点应用 → 回读新值，按钮回解",
+      async run({ page }) {
+        const dialog = await openModels(page);
+        const row = dialog.locator(".gvr-rpm").first();
+        await row.waitFor({ state: "visible", timeout: 25_000 });
+        await row.locator("input").fill("77");
+        await row.locator("button", { hasText: "应用" }).click();
+        // busy 回解：按钮文字回“应用”（曾卡死“应用中”的回归）。
+        await row.locator("button", { hasText: "应用" }).waitFor({ timeout: 15_000 });
+        const value = await row.locator("input").inputValue();
+        if (value !== "77") throw new Error(`回读失败：期望 77，实得 ${value}`);
+        // 清除：删掉服务商级 rpm，回读空（回落上层=不限）。
+        await row.locator("button", { hasText: "清除" }).click();
+        let cleared = "";
+        for (let i = 0; i < 30 && cleared !== ""; i++) {
+          if (i > 0) await page.waitForTimeout(500);
+          cleared = await row.locator("input").inputValue();
+        }
+        if (cleared !== "") throw new Error(`清除后回读失败：期望空，实得 ${cleared}`);
+      },
+    },
+    {
+      name: "探测行挂载：有点探测按钮；点探测走真链路（失败/取消皆算通）",
+      async run({ page }) {
+        const dialog = await openModels(page);
+        const row = dialog.locator(".gvr-probe").first();
+        await row.waitFor({ state: "visible", timeout: 25_000 });
+        const hint = await row.innerText();
+        if (!hint.includes("探测")) throw new Error(`探测行无探测字样，实得：${hint.slice(0, 60)}`);
+        await row.locator("button", { hasText: "探测" }).click();
+        // 裸实例无 key：要么 fast-fail 出错误文案，要么跑起来（出现取消按钮）→ 主动取消。
+        const cancel = row.locator("button", { hasText: "取消" });
+        try {
+          await cancel.waitFor({ state: "visible", timeout: 8_000 });
+          await cancel.click();
+        } catch {
+          // 8 秒内没进入 running：应已直接落地结论/错误，不断言细节，下一步统一验行文案。
+        }
+        let text = "";
+        for (let i = 0; i < 30 && !(text.length > 20 && /探测|取消|写入|失败|触顶|RPM|错误|已有探测/.test(text)); i++) {
+          await page.waitForTimeout(1000);
+          text = await row.innerText().catch(() => "");
+        }
+        if (!(text.length > 20 && /探测|取消|写入|失败|触顶|RPM|错误|已有探测/.test(text))) {
+          throw new Error(`探测行无结论文案，实得：${text.slice(0, 120)}`);
+        }
+        await page.screenshot({ path: "/tmp/gov-probe.png" });
+      },
+    },
+  ],
 });

@@ -5,8 +5,9 @@
  *   cordis        → src/cordis.ts（服务注册 / Remote 契约 / 宿主接线）
  *   limiter       → src/limiter.ts（RPM/TPM/并发令牌桶与排队）
  *   sessionheader → src/session-header.ts（OpenCode x-opencode-session 兼容头）
- *   thinking      → src/thinking.ts（思考档位读出与覆盖写）
- *   errors        → src/errors.ts（错误翻译与可行动文案）
+ *   thinking      → src/describe-input.ts（旧名 thinking.ts，describe 入参加工；历史 scope 名保留）
+ *   errors        → src/errors.ts（已删除；历史 scope 名保留）
+ *   probe         → src/probe.ts（RPM 探测纯函数层：参数校验/块分类/估计汇总）
  *   config        → src/config.ts（配置类型/缺省/归一化/校验）
  *   client        → lib/client.js（浏览器半：Models 页 provider-card 扩展 + footer）
  *   tests         → tests/（仅测试改动时）
@@ -25,7 +26,7 @@ module.exports = {
   rules: {
     "header-max-length": [2, "always", 100],
     "body-max-line-length": [2, "always", 160],
-    "scope-enum": [2, "always", ["cordis", "limiter", "sessionheader", "thinking", "errors", "config", "client", "tests", "infra", "deps"]],
+    "scope-enum": [2, "always", ["cordis", "limiter", "sessionheader", "thinking", "errors", "probe", "config", "client", "tests", "infra", "deps"]],
     "scope-case": [2, "always", "lower-case"],
     // 中文 subject 常见，且允许 AI/API/SRC/GUI 等缩写开头：关掉大小写启发式。
     "subject-case": [0],

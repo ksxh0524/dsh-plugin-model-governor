@@ -1,11 +1,18 @@
-/** cordis.test.ts —— S4 服务端入口契约测试（不起真宿主，桩 ctx + 真 limiter/config/session-header）：
- *  ① 原型 SRC 标记形态 = typert-protocol mark() 产物（version:1 + direct，describe/configure 双方法）；
+/** cordis.test.ts —— S4 服务端入口契约测试（不起真插件，桩 ctx + 真 limiter/config/session-header）：
+ *  ① 原型 SRC 标记形态 = typert-protocol mark() 产物（version:1 + direct，
+ *     describe/configure/probe/probeStatus/cancelProbe 五方法）；
  *  ② SRC 参数解析复刻（网关 methodParameterNames：括号切分 + 纯标识符过滤，`: unknown` 注解 strip 后可带）；
  *  ③ applyCordis 经 ctx.reflect.provide 注册 governor 服务 + default 三键同源 + inject 声明；
- *  ④ `llm/stream` 监听行为：双桶 acquire（min 语义）→ header 条件包裹 → `next()` 恰一次 →
- *     finally 双 release；abort 放弃且不调 next；非目标 provider / 无 sessionId 只跳过 header；
- *  ⑤ describe 合并读出（自带档位/默认档/上下文/输出/生效限流/issues；失配折 UNKNOWN_MODEL 可修文案）；
- *  ⑥ configure 写回（非法补丁中文拒收且不落盘；catalog/custom 落 settings.mutate；live 限流即时生效）。
+ *  ④ `llm/stream` 监听行为：双桶 acquire（provider 桶用线路口径、模型桶用 pair 生效值，
+ *     min 语义）→ header 条件包裹 → `next()` 恰一次 → finally 双 release；abort 放弃且不调 next；
+ *     非目标 provider / 无 sessionId 只跳过 header；探测旁路跳过 acquire 但 header 照常；
+ *     成败 exactly-once 进 noteOutcome（熔断口子），口子永不抛、不断流；
+ *  ⑤ describe 限流读出（按 filter 列 id + 生效限流；provider 缺席但 model 在场按 model 过滤；
+ *     不读模型元数据、不抛）；
+ *  ⑥ configure 写回（非法补丁中文拒收；思考键已移除、再传按未知键拒收；某维 null=删除回落；
+ *     live 限流即时生效）；
+ *  ⑦ probe 两阶段探测（小 RPM 单发定论、大水管 burst 逼近；触顶自动填入 provider 级 rpm，
+ *     未触顶/失败/取消一律不写；单飞行 busy；cancelProbe 取消）。
  *
  * fetch 说明：applyCordis 会补丁 globalThis.fetch（header 机制本体的另一半）；模块级 after 钩子
  * 统一还原，header 断言走“桩 fetch 捕获头”而非真实网络。 */
@@ -26,23 +33,8 @@ interface RemoteMethodsMarker {
   version: number;
   methods: Array<{ method: string; invocation: { kind: string } }>;
 }
-/** 桩宿主 ctx：真实形态由宿主决定，测试只关心被断言的子集，故宽类型为 any。 */
+/** 桩 ctx：真实形态由运行时决定，测试只关心被断言的子集，故宽类型为 any。 */
 type StubCtx = any;
-
-const MODEL_INFO = {
-  provider: "opencode",
-  id: "qwen3-coder",
-  name: "Qwen3 Coder",
-  reasoning: {
-    efforts: [
-      { id: "low", name: "Low" },
-      { id: "high", name: "High" },
-    ],
-    defaultEffort: "high",
-  },
-  context: { contextWindow: 262144 },
-  defaultMaxTokens: 32000,
-};
 
 /** 网关 methodParameterNames 的解析复刻（dsh-check contract.ts 同款；`: unknown` 经 type-strip 变空白后仍得纯标识符）。 */
 const srcParamNames = (fn: Function): string[] => {
@@ -56,36 +48,15 @@ const srcParamNames = (fn: Function): string[] => {
     .filter((token) => /^[A-Za-z_$][\w$]*$/.test(token));
 };
 
-function unknownModelError(): Error {
-  const err = new Error('unknown model opencode/ghost "x"') as Error & { code: string };
-  err.code = "UNKNOWN_MODEL";
-  return err;
-}
-
 function makeLlm(overrides: Record<string, unknown> = {}): any {
   return {
     listProviders: async () => [{ id: "opencode" }],
     listModels: async (provider: string) => (provider === "opencode" ? [{ id: "qwen3-coder", name: "Qwen3 Coder" }] : []),
-    resolveModelInfo: async (provider: string, model: string) => {
-      if (provider === "opencode" && model === "qwen3-coder") return MODEL_INFO;
-      throw unknownModelError();
-    },
     ...overrides,
   };
 }
 
-function makeSettings(captured: Record<string, unknown>, value: unknown = { providers: {} }, revision = 7): any {
-  return {
-    describe: () => [{ ns: "llm-pi-ai", value, revision }],
-    mutate: async (ns: unknown, ops: unknown, rev?: unknown) => {
-      captured.ns = ns;
-      captured.ops = ops;
-      captured.rev = rev;
-    },
-  };
-}
-
-function makeCtx(opts: { llm?: any; settings?: any; injectSettings?: boolean } = {}): {
+function makeCtx(opts: { llm?: any } = {}): {
   ctx: StubCtx;
   provided: Record<string, unknown>;
   listeners: Array<{ event: string; fn: Function; opts: unknown }>;
@@ -94,7 +65,6 @@ function makeCtx(opts: { llm?: any; settings?: any; injectSettings?: boolean } =
   const provided: Record<string, unknown> = {};
   const listeners: Array<{ event: string; fn: Function; opts: unknown }> = [];
   const logs: string[] = [];
-  const settings = opts.settings ?? makeSettings({});
   const ctx: StubCtx = {
     reflect: {
       provide: (key: string, svc: unknown) => {
@@ -108,13 +78,8 @@ function makeCtx(opts: { llm?: any; settings?: any; injectSettings?: boolean } =
       listeners.push({ event, fn, opts: listenerOpts });
       return () => {};
     },
-    inject: (deps: string[], cb: (face: unknown) => void) => {
-      if (opts.injectSettings !== false && deps.includes("settings")) cb({ settings });
-      return () => {};
-    },
     get: (serviceName: string) => {
       if (serviceName === "llm") return opts.llm;
-      if (serviceName === "settings") return settings;
       return undefined;
     },
     effect: (fn: () => () => void) => fn(),
@@ -153,17 +118,20 @@ test("SRC 标记与 typertRemote 绑定形态符合 gateway 读取契约", () =>
   assert.equal(marker.value.version, 1);
   assert.deepEqual(
     marker.value.methods.map((m) => m.method),
-    ["describe", "configure"],
-    "Remote 收口为 describe/configure 双方法",
+    ["describe", "configure", "probe", "probeStatus", "cancelProbe"],
+    "Remote 收口为 describe/configure/probe/probeStatus/cancelProbe 五方法",
   );
   assert.deepEqual(
     marker.value.methods.map((m) => m.invocation.kind),
-    ["direct", "direct"],
+    ["direct", "direct", "direct", "direct", "direct"],
   );
   // SRC 参数形态：单形参纯标识符；`: unknown` 注解经 type-strip 后只剩空白，解析仍得标识符。
   const proto = GovernorService.prototype as any;
   assert.deepEqual(srcParamNames(proto.describe), ["filter"], "describe wire 参数名 = filter");
   assert.deepEqual(srcParamNames(proto.configure), ["patch"], "configure wire 参数名 = patch");
+  assert.deepEqual(srcParamNames(proto.probe), ["spec"], "probe wire 参数名 = spec");
+  assert.deepEqual(srcParamNames(proto.probeStatus), ["filter"], "probeStatus wire 参数名 = filter");
+  assert.deepEqual(srcParamNames(proto.cancelProbe), ["target"], "cancelProbe wire 参数名 = target");
 });
 
 test("default 三键同源 + applyCordis 提供注册", () => {
@@ -270,63 +238,33 @@ test("监听：abort 放弃排队且不调 next", async () => {
   assert.equal(nextCalls, 0, "abort 即放弃排队：next() 不得调用");
 });
 
-test("describe：单模型合并读出（自带档位/默认档/上下文/输出/生效限流）", async () => {
+test("describe：单模型限流读出（provider/model 键 + 生效限流）", async () => {
   const { ctx } = makeCtx({ llm: makeLlm() });
   const svc = applyCordis(ctx, {});
   const result = await svc.describe({ provider: "opencode", model: "qwen3-coder" });
   assert.deepEqual(result.filter, { provider: "opencode", model: "qwen3-coder" });
-  assert.equal(result.revision, 7, "须带回 llm-pi-ai revision（configure 作 expectedRevision）");
   assert.equal(result.models.length, 1);
-  const entry = result.models[0];
-  assert.equal(entry.found, true);
-  assert.deepEqual(entry.builtin.efforts, ["low", "high"]);
-  assert.equal(entry.builtin.defaultEffort, "high");
-  assert.deepEqual(entry.effective.efforts, ["low", "high"], "无覆盖 = 跟随自带");
-  assert.equal(entry.effective.defaultEffort, "high");
-  assert.equal(entry.contextWindow, 262144);
-  assert.equal(entry.maxTokens, 32000);
-  assert.deepEqual(entry.limits, {}, "空配置 = 不限流");
-  assert.deepEqual(entry.issues, []);
-  assert.deepEqual(result.modelErrors, []);
+  assert.deepEqual(result.models[0], { provider: "opencode", model: "qwen3-coder", limits: {} });
 });
 
-test("describe：未知模型折 UNKNOWN_MODEL 可修文案（不抛）", async () => {
-  const { ctx } = makeCtx({ llm: makeLlm() });
-  const svc = applyCordis(ctx, {});
-  const result = await svc.describe({ provider: "opencode", model: "ghost" });
-  assert.equal(result.models.length, 1);
-  assert.equal(result.models[0].found, false);
-  assert.equal(result.modelErrors.length, 1);
-  assert.match(result.modelErrors[0].advice.title, /未知模型/, "issues 首条须为 UNKNOWN_MODEL 可行动文案");
-  assert.ok(result.modelErrors[0].advice.actions.length > 0, "可行动文案须带 actions");
-});
-
-test("describe：本地覆盖合并（modelOverrides + 路由级默认）", async () => {
-  const captured: Record<string, unknown> = {};
-  const settings = makeSettings(captured, {
-    providers: { opencode: { reasoning: "low", modelOverrides: { "qwen3-coder": { reasoningEfforts: { low: "low" } } } } },
+test("describe：读出不碰模型元数据（无 resolve 系调用也照常出数）", async () => {
+  let metaCalls = 0;
+  const llm = makeLlm({
+    resolveModelInfo: async () => {
+      metaCalls += 1;
+      throw new Error("must not be called");
+    },
+    resolveModel: async () => {
+      metaCalls += 1;
+      throw new Error("must not be called");
+    },
   });
-  const { ctx } = makeCtx({ llm: makeLlm(), settings });
-  const svc = applyCordis(ctx, {});
-  const result = await svc.describe({ provider: "opencode", model: "qwen3-coder" });
-  assert.deepEqual(result.models[0].effective.efforts, ["low"], "覆盖档位整体替换自带");
-  assert.equal(result.models[0].effective.defaultEffort, "low");
-});
-
-test("describe：modelOverrides 指错 id 记入 modelErrors", async () => {
-  const captured: Record<string, unknown> = {};
-  const settings = makeSettings(captured, {
-    providers: { opencode: { modelOverrides: { ghost: { reasoningEfforts: { low: "low" } } } } },
-  });
-  const { ctx } = makeCtx({ llm: makeLlm(), settings });
+  const { ctx } = makeCtx({ llm });
   const svc = applyCordis(ctx, {});
   const result = await svc.describe({ provider: "opencode" });
   assert.equal(result.models.length, 1);
-  assert.deepEqual(
-    result.modelErrors.map((e) => e.model),
-    ["ghost"],
-    "覆盖了不存在的模型 id 须进可修清单",
-  );
+  assert.deepEqual(result.models[0].limits, {});
+  assert.equal(metaCalls, 0, "RPM 读出只列 id + 合并限流，不读模型元数据");
 });
 
 test("describe：空 filter 枚举全部路由模型", async () => {
@@ -338,77 +276,286 @@ test("describe：空 filter 枚举全部路由模型", async () => {
   assert.equal(result.models[0].model, "qwen3-coder");
 });
 
-test("configure：非法补丁中文拒收且不落盘", async () => {
-  const captured: Record<string, unknown> = {};
-  const { ctx } = makeCtx({ llm: makeLlm(), settings: makeSettings(captured) });
+test("configure：非法补丁中文拒收", async () => {
+  const { ctx } = makeCtx({ llm: makeLlm() });
   const svc = applyCordis(ctx, {});
-  const result = await svc.configure({
-    limits: { defaults: { rpm: 0 } },
-    provider: "opencode",
-    model: "qwen3-coder",
-    routeKind: "catalog",
-    efforts: ["low"],
-  });
+  const result = await svc.configure({ limits: { defaults: { rpm: 0 } } });
   assert.equal(result.ok, false);
   assert.ok(result.errors.length > 0);
-  for (const message of result.errors) assert.match(message, /[\u4e00-\u9fa5]/, "逐条中文报错");
-  assert.equal(captured.ns, undefined, "校验失败不得落盘（settings.mutate 不得调用）");
+  for (const message of result.errors) assert.match(message, /[一-鿿]/, "逐条中文报错");
 });
 
-test("configure：目录路由落 modelOverrides（revision 透传）", async () => {
-  const captured: Record<string, unknown> = {};
-  const { ctx } = makeCtx({ llm: makeLlm(), settings: makeSettings(captured) });
+test("configure：思考键已移除（再传按未知键拒收）", async () => {
+  const { ctx } = makeCtx({ llm: makeLlm() });
   const svc = applyCordis(ctx, {});
-  const result = await svc.configure({
-    provider: "opencode",
-    model: "qwen3-coder",
-    routeKind: "catalog",
-    efforts: ["low"],
-    defaultEffort: "low",
-  });
-  assert.equal(result.ok, true);
-  assert.deepEqual(result.errors, []);
-  assert.equal(captured.ns, "llm-pi-ai");
-  assert.equal(captured.rev, 7, "须透传 expectedRevision（custom 并发写防互盖同链路）");
-  assert.deepEqual(captured.ops, [
-    { op: "set", path: ["providers", "opencode", "reasoning"], value: "low" },
-    { op: "set", path: ["providers", "opencode", "modelOverrides", "qwen3-coder", "reasoningEfforts"], value: { low: "low" } },
-  ]);
-  assert.deepEqual(result.applied.mutations, captured.ops);
-});
-
-test("configure：custom 路由经 listModels 补全量后整数组 set", async () => {
-  const captured: Record<string, unknown> = {};
-  const llm = makeLlm({ listModels: async () => [{ id: "m1", reasoningEfforts: { low: "low" } }] });
-  const settings = makeSettings(captured, { providers: { custom: { models: [{ id: "m1" }] } } });
-  const { ctx } = makeCtx({ llm, settings });
-  const svc = applyCordis(ctx, {});
-  const result = await svc.configure({ provider: "custom", model: "m1", routeKind: "custom", efforts: ["low"] });
-  assert.equal(result.ok, true);
-  assert.deepEqual(captured.ops, [{ op: "set", path: ["providers", "custom", "models"], value: [{ id: "m1", reasoningEfforts: { low: "low" } }] }]);
+  const result = await svc.configure({ provider: "opencode", model: "qwen3-coder", efforts: ["low"] });
+  assert.equal(result.ok, false);
+  assert.match(result.errors.join("；"), /未知配置项/, "思考覆盖整包移除，只认 limits/sessionHeader");
 });
 
 test("configure：governor 切片并入 live（后续限流/读出即时生效）", async () => {
-  const { ctx } = makeCtx({ llm: makeLlm(), settings: makeSettings({}) });
+  const { ctx } = makeCtx({ llm: makeLlm() });
   const svc = applyCordis(ctx, {});
   const result = await svc.configure({ limits: { defaults: { rpm: 60 } } });
   assert.equal(result.ok, true);
-  assert.deepEqual(result.applied.governor, { limits: { defaults: { rpm: 60 } } });
-  assert.deepEqual(result.applied.mutations, []);
+  assert.deepEqual(result.applied, { governor: { limits: { defaults: { rpm: 60 } } } });
   const readout = await svc.describe({ provider: "opencode", model: "qwen3-coder" });
   assert.deepEqual(readout.models[0].limits, { rpm: 60 }, "live 配置须即时影响 effectiveLimits");
 });
 
-test("configure：未知顶层键拒收；settings 缺席时 thinking 写失败不抛", async () => {
-  const { ctx } = makeCtx({ llm: makeLlm(), settings: makeSettings({}) });
+test("configure：未知顶层键拒收", async () => {
+  const { ctx } = makeCtx({ llm: makeLlm() });
   const svc = applyCordis(ctx, {});
   const unknown = await svc.configure({ bogus: 1 });
   assert.equal(unknown.ok, false);
   assert.match(unknown.errors.join("；"), /未知配置项/);
-  const bare = makeCtx({ llm: makeLlm(), injectSettings: false });
-  bare.ctx.get = () => undefined;
-  const svc2 = applyCordis(bare.ctx, {});
-  const result = await svc2.configure({ provider: "p", model: "m", routeKind: "catalog", efforts: ["x"] });
-  assert.equal(result.ok, false, "settings 缺席不得静默吞写");
-  assert.match(result.errors.join("；"), /settings/);
+});
+
+test("noteOutcome：熔断口子永不抛；下游炸流照常透传且不占名额", async () => {
+  const { ctx, listeners } = makeCtx({ llm: makeLlm() });
+  const svc = applyCordis(ctx, {}) as GovernorService;
+  assert.doesNotThrow(() => svc.noteOutcome("opencode", undefined));
+  assert.doesNotThrow(() => svc.noteOutcome("opencode", new Error("boom")));
+  const listen = streamListenerOf(listeners);
+  const boom = new Error("downstream boom");
+  await assert.rejects(
+    drain(
+      listen({ provider: "opencode", model: "qwen3-coder", sessionId: "s1" }, async function* () {
+        throw boom;
+      }),
+    ),
+    (err: unknown) => err === boom,
+    "下游错误须原样透传（口子只收信号不改流）",
+  );
+  // 名额已归还：同一 key 再走一次成功流不卡死。
+  const chunks = await drain(
+    listen({ provider: "opencode", model: "qwen3-coder", sessionId: "s1" }, async function* () {
+      yield "ok";
+    }),
+  );
+  assert.deepEqual(chunks, ["ok"]);
+});
+
+/* ---------- 审查修复回归 ---------- */
+
+test("监听：provider 桶用线路口径（模型级 rpm 不连带卡死其他模型）", async () => {
+  const { ctx, listeners } = makeCtx({ llm: makeLlm() });
+  applyCordis(ctx, { limits: { providers: { p: { rpm: 100 } }, models: { "p/m": { rpm: 1 } } } });
+  const onStream = streamListenerOf(listeners);
+  const run = (model: string, signal?: AbortSignal) =>
+    drain(
+      (onStream as any)({ provider: "p", model, signal }, () =>
+        (async function* () {
+          yield "x";
+        })(),
+      ),
+    );
+  await withTimeout(run("m"), 2000, "首个 p/m 超时");
+  const stopper = new AbortController();
+  const second = run("m", stopper.signal); // 占模型桶 rpm:1，应排队
+  try {
+    // 线路桶余量充足（1/100）：p/other 必须立即过（旧口径会跟在 p/m 后面排 60s）。
+    assert.deepEqual(await withTimeout(run("other"), 2000, "p/other 被模型级 rpm 连带卡死：provider 桶误用 pair 口径"), ["x"]);
+  } finally {
+    stopper.abort();
+    await assert.rejects(second, "排队的第二个 p/m 应随 abort 撤出");
+  }
+});
+
+test("监听：探测旁路跳过 acquire（本地 rpm=1 也不排队），header 照常", async () => {
+  const seen: Array<{ headers: Headers }> = [];
+  globalThis.fetch = (async (_input: any, init?: any) => {
+    seen.push({ headers: new Headers(init?.headers) });
+    return { ok: true } as any;
+  }) as any;
+  const { ctx, listeners } = makeCtx({ llm: makeLlm() });
+  const svc = applyCordis(ctx, { limits: { defaults: { rpm: 1 } } });
+  const onStream = streamListenerOf(listeners);
+  const run = (signal?: AbortSignal) =>
+    drain(
+      (onStream as any)({ provider: "opencode", model: "m", sessionId: "s-bypass", signal }, () =>
+        (async function* () {
+          await globalThis.fetch("http://governor-fixture.local/v1", {});
+          yield "x";
+        })(),
+      ),
+    );
+  await withTimeout(run(), 2000, "首个请求超时");
+  const stopper = new AbortController();
+  const blocked = run(stopper.signal); // 占掉 rpm:1，排队中
+  try {
+    const bypassed = await withTimeout(
+      svc.probeBypass.run(true, () => run()),
+      2000,
+      "旁路流量应跳过本地排队直通",
+    );
+    assert.deepEqual(bypassed, ["x"]);
+    assert.equal(seen[seen.length - 1].headers.get(SESSION_HEADER), "s-bypass", "旁路只跳限流，header 照常进 store");
+    // 正常流量仍在排队：短超时内不得完成（排队语义未被旁路破坏）。
+    await assert.rejects(
+      withTimeout(
+        blocked.then(() => "leaked"),
+        300,
+        "排队流量被旁路提前放行",
+      ),
+      /排队流量被旁路提前放行/,
+    );
+  } finally {
+    stopper.abort();
+    await assert.rejects(blocked, "排队的请求应随 abort 撤出");
+  }
+});
+
+test("configure：某维 null=删除回落（删掉已设值，不限流请省略、删除请 null）", async () => {
+  const { ctx } = makeCtx({ llm: makeLlm() });
+  const svc = applyCordis(ctx, {});
+  assert.equal((await svc.configure({ limits: { providers: { p: { rpm: 60 } } } })).ok, true);
+  assert.deepEqual((await svc.describe({ provider: "p", model: "m" })).models[0].limits, { rpm: 60 });
+  const cleared = await svc.configure({ limits: { providers: { p: { rpm: null } } } });
+  assert.equal(cleared.ok, true);
+  assert.deepEqual((await svc.describe({ provider: "p", model: "m" })).models[0].limits, {}, "删掉后回落上层（空=不限）");
+});
+
+test("describe：provider 缺席但 model 在场按 model 精确过滤", async () => {
+  const llm = makeLlm({
+    listProviders: async () => [{ id: "opencode" }, { id: "buzz" }],
+    listModels: async (provider: string) => (provider === "opencode" ? [{ id: "a" }, { id: "b" }] : [{ id: "b" }]),
+  });
+  const { ctx } = makeCtx({ llm });
+  const svc = applyCordis(ctx, {});
+  const result = await svc.describe({ model: "b" });
+  assert.equal(result.models.length, 2);
+  for (const entry of result.models) assert.equal(entry.model, "b");
+});
+
+/* ---------- probe ---------- */
+
+type ProbeBehavior = "ok" | "limited" | "quota" | "auth";
+
+/** 脚本化桩 llm（按调用序号落地终端块；小延迟让出事件循环，感知 abort）。 */
+function makeProbeLlm(behavior: (callIndex: number) => ProbeBehavior, delayMs = 5): any {
+  let calls = 0;
+  return {
+    listProviders: async () => [{ id: "p" }],
+    listModels: async () => [{ id: "m" }],
+    stream: (options: any) =>
+      (async function* () {
+        const n = calls++;
+        await new Promise((r) => setTimeout(r, delayMs));
+        if (options.signal?.aborted) {
+          yield { type: "finish", reason: { kind: "aborted", failure: { code: "ABORTED", message: "cancelled" } } };
+          return;
+        }
+        const kind = behavior(n);
+        if (kind === "ok") yield { type: "finish", reason: { kind: "stop" } };
+        else if (kind === "limited") {
+          yield { type: "finish", reason: { kind: "error", failure: { code: "RATE_LIMIT", message: "429 slow down" } } };
+        } else if (kind === "quota") {
+          yield { type: "finish", reason: { kind: "error", failure: { code: "QUOTA", message: "out of credits" } } };
+        } else {
+          yield { type: "finish", reason: { kind: "error", failure: { code: "AUTH", message: "invalid key" } } };
+        }
+      })(),
+  };
+}
+
+async function waitProbeDone(svc: GovernorService, provider: string, timeoutMs = 15000): Promise<any> {
+  const start = Date.now();
+  for (;;) {
+    const status = await svc.probeStatus({ provider });
+    if (status.state === "done" && status.result !== undefined) return status.result;
+    if (Date.now() - start > timeoutMs) throw new Error(`等探测结论超时：${JSON.stringify(status)}`);
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
+
+test("probe：小 RPM 单发定论（3 成功后 429 → 估计 3 并自动填入）", async () => {
+  const { ctx } = makeCtx({ llm: undefined });
+  const svc = applyCordis(ctx, {});
+  ctx.get = (
+    (_inner: unknown) => (_name: string) =>
+      _inner
+  )(makeProbeLlm((n) => (n < 3 ? "ok" : "limited")));
+  const started = await svc.probe({ provider: "p", phaseA: 10, bursts: [], maxRequests: 20 });
+  assert.equal(started.ok, true);
+  const result = await waitProbeDone(svc, "p");
+  assert.equal(result.topped, true);
+  assert.equal(result.estimate, 3);
+  assert.equal(result.applied, true);
+  assert.equal(result.appliedRpm, 3);
+  assert.match(result.note, /已自动填入/);
+  assert.deepEqual((await svc.describe({ provider: "p", model: "m" })).models[0].limits, { rpm: 3 }, "触顶必须自动填入 provider 级 rpm");
+});
+
+test("probe：端到端走真监听器（本地 rpm=1 不污染探测）", async () => {
+  const { ctx, listeners } = makeCtx({ llm: undefined });
+  const svc = applyCordis(ctx, { limits: { defaults: { rpm: 1 } } });
+  const onStream = streamListenerOf(listeners);
+  let n = 0;
+  const scripted = makeProbeLlm(() => {
+    n += 1;
+    return "ok";
+  });
+  // 宿主 llm 面 = 瀑布直通：stream 进监听器，下游按脚本落地（5 个全过）。
+  ctx.get = () => ({
+    listProviders: async () => [{ id: "p" }],
+    listModels: async () => [{ id: "m" }],
+    stream: (options: any) => (onStream as any)(options, () => scripted.stream(options)),
+  });
+  const started = await svc.probe({ provider: "p", phaseA: 5, bursts: [], maxRequests: 5 });
+  assert.equal(started.ok, true);
+  const result = await waitProbeDone(svc, "p", 10000);
+  assert.equal(n, 5);
+  assert.equal(result.topped, false, "全过=未触顶");
+  assert.equal(result.applied, false, "未触顶绝不写配置");
+  assert.deepEqual((await svc.describe({ provider: "p", model: "m" })).models[0].limits, { rpm: 1 }, "本地配置保持原样");
+});
+
+test("probe：配额见底停探不写（QUOTA≠RPM）", async () => {
+  const { ctx } = makeCtx({ llm: undefined });
+  const svc = applyCordis(ctx, {});
+  ctx.get = (
+    (_inner: unknown) => (_name: string) =>
+      _inner
+  )(makeProbeLlm(() => "quota"));
+  assert.equal((await svc.probe({ provider: "p", phaseA: 5, bursts: [] })).ok, true);
+  const result = await waitProbeDone(svc, "p");
+  assert.equal(result.topped, false);
+  assert.equal(result.applied, false);
+  assert.equal(result.failure?.code, "QUOTA");
+  assert.match(result.note, /未写入/);
+  assert.deepEqual((await svc.describe({ provider: "p", model: "m" })).models[0].limits, {});
+});
+
+test("probe：单飞行 busy + cancelProbe 取消", async () => {
+  const { ctx } = makeCtx({ llm: undefined });
+  const svc = applyCordis(ctx, {});
+  ctx.get = (
+    (_inner: unknown) => (_name: string) =>
+      _inner
+  )(makeProbeLlm(() => "ok", 30));
+  assert.equal((await svc.probe({ provider: "p", phaseA: 30, bursts: [], maxRequests: 30 })).ok, true);
+  const busy = await svc.probe({ provider: "p", phaseA: 1 });
+  assert.equal(busy.ok, false);
+  assert.match(busy.errors.join("；"), /已有探测在跑/);
+  const running = await svc.probeStatus({ provider: "p" });
+  assert.equal(running.state, "running");
+  assert.ok((running.sent ?? 0) >= 0);
+  assert.deepEqual(await svc.cancelProbe({ provider: "p" }), { ok: true, cancelled: true, errors: [] });
+  const result = await waitProbeDone(svc, "p");
+  assert.equal(result.cancelled, true);
+  assert.equal(result.applied, false);
+  assert.deepEqual(await svc.cancelProbe({ provider: "p" }), { ok: true, cancelled: false, errors: [] }, "idle 再取消照常 ok");
+});
+
+test("probe：非法参数中文拒收；status/cancel 无 provider 行为", async () => {
+  const { ctx } = makeCtx({ llm: makeLlm() });
+  const svc = applyCordis(ctx, {});
+  const bad = await svc.probe({ phaseA: 999 });
+  assert.equal(bad.ok, false);
+  for (const message of bad.errors) assert.match(message, /[一-鿿]/);
+  assert.deepEqual(await svc.probeStatus({ provider: "never-ran" }), { state: "idle" });
+  assert.deepEqual(await svc.probeStatus({}), { state: "idle" });
+  const noTarget = await svc.cancelProbe({});
+  assert.equal(noTarget.ok, false);
 });

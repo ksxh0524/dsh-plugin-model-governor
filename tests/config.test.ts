@@ -5,7 +5,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { defaultConfig, effectiveLimits, normalizeConfig, validateConfigPatch } from "../src/config.ts";
+import { defaultConfig, deleteNullLeaves, effectiveLimits, effectiveProviderLimits, normalizeConfig, validateConfigPatch } from "../src/config.ts";
 
 const HAS_CHINESE = /[\u4e00-\u9fa5]/;
 
@@ -234,5 +234,38 @@ describe("normalizeConfig：缺键补缺省", () => {
     (got.limits?.defaults as { rpm?: number }).rpm = 999;
     (got.sessionHeader?.providers as string[]).push("q");
     assert.deepStrictEqual(input, { limits: { defaults: { rpm: 7 } }, sessionHeader: { providers: ["p"] } });
+  });
+
+  it("null 维度丢弃（删除标记不进 live）", () => {
+    const got = normalizeConfig({ limits: { providers: { p: { rpm: null, tpm: 100 } } } });
+    assert.deepStrictEqual(got.limits?.providers?.["p"], { tpm: 100 });
+  });
+});
+
+describe("effectiveProviderLimits：整条线路口径（不掺模型级）", () => {
+  it("只取 provider → defaults，模型级再严也不影响线路桶", () => {
+    const cfg = {
+      limits: {
+        defaults: { rpm: 60, tpm: 1000 },
+        providers: { p: { rpm: 30 } },
+        models: { "p/m": { rpm: 10, tpm: 2000 } },
+      },
+    };
+    assert.deepStrictEqual(effectiveProviderLimits(cfg, "p"), { rpm: 30, tpm: 1000 });
+    assert.deepStrictEqual(effectiveProviderLimits(cfg, "q"), { rpm: 60, tpm: 1000 });
+    assert.deepStrictEqual(effectiveProviderLimits(cfg, "p").rpm, 30, "模型级 rpm:10 不得漏进线路口径");
+  });
+});
+
+describe("validateConfigPatch + deleteNullLeaves：null=删除", () => {
+  it("null 维度校验放行（删除语义）", () => {
+    assert.deepStrictEqual(validateConfigPatch({ limits: { providers: { p: { rpm: null } } } }), []);
+    assert.deepStrictEqual(validateConfigPatch({ limits: { defaults: { rpm: null, tpm: null } } }), []);
+  });
+
+  it("deleteNullLeaves 删 null 叶、保留空对象与其他分支", () => {
+    const merged = { limits: { defaults: { rpm: 60 }, providers: { p: { rpm: null, tpm: 5 } } }, sessionHeader: { mode: "uuid" } };
+    deleteNullLeaves(merged);
+    assert.deepStrictEqual(merged, { limits: { defaults: { rpm: 60 }, providers: { p: { tpm: 5 } } }, sessionHeader: { mode: "uuid" } });
   });
 });
