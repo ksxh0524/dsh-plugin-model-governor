@@ -1,0 +1,38 @@
+name: Publish
+# 打 tag 发 npm：git push tag v* → npm publish（需在仓库 Secrets 配置 NPM_TOKEN = npm Automation 令牌）。
+# ⚠ 首版（全新包名）npm 强制人工 web 认证（EOTP），token 发不了——须在本地手动
+#   `npm publish` 一次建包；之后本工作流负责所有后续 tag 的自动发布。
+# tag 即发布点——推 tag 前本地三道门（pnpm check / husky）已过，此处不复跑测试；
+# 只做发布前对账：tag 号必须等于 package.json 的 version，防错版本误发。
+# workflow_dispatch 供漏触发时（如 secret 晚于 tag 配置）在默认分支上手动补发。
+"on":
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm provenance：供应链 attestation 签名
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        env:
+          # setup-node 在此刻把 NODE_AUTH_TOKEN 写进 ~/.npmrc 的 _authToken——
+          # 挂在后续 publish step 上是无效的（npm 不读该环境变量）。
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Version sanity（仅 tag 触发时校验）
+        if: github.event_name == 'push'
+        run: |
+          PKG_VER=$(node -p "require('./package.json').version")
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          if [ "$PKG_VER" != "$TAG_VER" ]; then
+            echo "tag v$TAG_VER ≠ package version $PKG_VER，拒发" >&2
+            exit 1
+          fi
+      # --ignore-scripts：无构建链包，prepare=husky 钩子与发布无关（CI 无 devDeps，跑了必炸）。
+      - run: npm publish --provenance --access public --ignore-scripts

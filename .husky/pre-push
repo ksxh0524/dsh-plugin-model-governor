@@ -1,0 +1,3 @@
+# 全量行为验证：node --test（fixture 口径 + 真实会话集成；无会话目录自动 skip）。
+# 格式化/类型检查已在 pre-commit 阻断，这里只兜底行为不回退。
+pnpm test || exit 1

@@ -1,0 +1,74 @@
+{
+  "name": "dsh-plugin-model-governor",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "DSH model governance plane: per-model thinking-intensity overrides with builtin readout, provider/model two-level RPM queueing (never rejects, only delays), OpenCode session-header compat, actionable error translation. UI extends the host Models page in place.",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "model",
+    "governance",
+    "rate-limit",
+    "reasoning-effort",
+    "opencode"
+  ],
+  "license": "MIT",
+  "author": "ksxh0524",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ksxh0524/dsh-plugin-model-governor.git"
+  },
+  "main": "src/cordis.ts",
+  "exports": {
+    ".": "./src/cordis.ts",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "lib",
+    "tests",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web"
+    }
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^21.0.2",
+    "@commitlint/config-conventional": "^21.0.2",
+    "@types/node": "^24.2.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^15.2.10",
+    "prettier": "^3.8.4",
+    "typescript": "^5.9.2",
+    "dsh-check": "link:../dsh-check"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "prepare": "husky",
+    "test": "node --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check": "pnpm format:check && pnpm typecheck && pnpm test"
+  },
+  "lint-staged": {
+    "*.{ts,tsx,js,mjs,cjs,json,jsonc,md,yml,yaml,html}": "prettier --write"
+  },
+  "packageManager": "pnpm@11.5.3"
+}

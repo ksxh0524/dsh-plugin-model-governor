@@ -1,0 +1,7 @@
+node_modules/
+*.log
+.DS_Store
+# pnpm 本地内容寻址存储（store-dir 相对路径），绝不入库
+.pnpm-store/
+# husky v9 生成的 hook 垫片目录（自带 .gitignore，这里再兜底）
+.husky/_/

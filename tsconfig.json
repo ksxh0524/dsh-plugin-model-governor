@@ -1,0 +1,17 @@
+{
+  "//": "开发期类型网：本包无构建链（宿主以 Node type-strip 直载 src/*.ts），tsc 只做 --noEmit 检查，产物永远是源码本身。",
+  "compilerOptions": {
+    "target": "es2023",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "lib": ["es2023"],
+    "types": ["node"],
+    "strict": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src", "tests"]
+}

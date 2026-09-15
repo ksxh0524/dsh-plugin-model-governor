@@ -1,0 +1,8 @@
+# 锁文件与依赖树不属于人工风格范畴
+pnpm-lock.yaml
+node_modules/
+dist/
+coverage/
+*.tgz
+# 本机 pnpm 内容寻址存储（若被引到仓库内），防御性忽略
+.pnpm-store/

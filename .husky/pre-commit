@@ -1,0 +1,10 @@
+# 密钥扫描：gitleaks v8.18+ 推荐的 pre-commit 写法（本机 brew 安装；无 CLI 的机器跳过，不假故障）。
+if command -v gitleaks >/dev/null 2>&1; then
+  gitleaks git --pre-commit --staged --redact || exit 1
+fi
+
+# 暂存文件格式化：prettier --write 并自动重新暂存（全仓库统一风格的唯一入口）。
+pnpm exec lint-staged || exit 1
+
+# 类型检查：本包无构建链（宿主以 Node type-strip 直载 src/*.ts），tsc --noEmit 是唯一的静态网，commit 时阻断。
+pnpm typecheck || exit 1
