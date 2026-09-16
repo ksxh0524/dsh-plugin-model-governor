@@ -184,3 +184,32 @@ test("TPM 预占位：窗内 token 超了就等，窗空了超配也放（永不
   await buckets.acquire("tpm-big", { tpm: 50 }, undefined, 60);
   assert.equal(sleeps.length, 0, "窗内无竞争时单次超配也放行（再等也腾不出配额，不饿死）");
 });
+
+test("abort 早醒不拖进程：默认睡眠 timer 一律 unref", async () => {
+  // 断真实语义：排队 abort 后残留的真 timer 不得持有事件循环（曾拖住测试进程 60 秒）。
+  // 包一层 setTimeout 如实记录（ms 照传、handle 照回），只看长 timer 是否 unref。
+  const created: Array<{ ms: number; hasRef: () => boolean }> = [];
+  const g = globalThis as { setTimeout: typeof setTimeout };
+  const realSetTimeout = g.setTimeout;
+  g.setTimeout = ((fn: (...args: unknown[]) => void, ms: number, ...rest: unknown[]) => {
+    const handle = (realSetTimeout as (...args: unknown[]) => NodeJS.Timeout)(fn, ms, ...rest);
+    created.push({ ms, hasRef: () => handle.hasRef() });
+    return handle;
+  }) as typeof setTimeout;
+  try {
+    const buckets = new TokenBuckets(); // 默认时钟 + 默认睡眠（真 timer）
+    await buckets.acquire("unref-rpm", { rpm: 1 });
+    const controller = new AbortController();
+    const queued = buckets.acquire("unref-rpm", { rpm: 1 }, controller.signal);
+    void queued.catch(() => {});
+    await new Promise((r) => setTimeout(r, 50));
+    controller.abort(new Error("test-abort"));
+    await assert.rejects(queued);
+    await new Promise((r) => setTimeout(r, 20));
+    const stranded = created.filter((t) => t.ms >= 59_000);
+    assert.ok(stranded.length >= 1, "排队应建过分钟级真 timer");
+    for (const t of stranded) assert.equal(t.hasRef(), false, "残留 timer 必须 unref，不得拖住进程退出");
+  } finally {
+    g.setTimeout = realSetTimeout;
+  }
+});

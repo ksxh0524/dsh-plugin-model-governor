@@ -11,7 +11,8 @@
  *   偏保守；若单次预占超过桶容量，等窗内其它占位滑出后仍放行，保证永不饿死）。
  * - 并发槽的释放靠调用方在 gated 工作结束后调 `release(key)`（cordis 侧放 `finally` 里）；多调无害（钳在 0）。
  * - 时钟与睡眠均可注入：生产用 `Date.now` + `setTimeout`，单测用假时钟 + 手动 fire 的睡眠，
- *   断言“等了多久”这类真实语义，而不是凑绿。
+ *   断言“等了多久”这类真实语义，而不是凑绿。默认睡眠 `unref`：abort 早醒后残留的 timer
+ *   不拖住进程退出（不断言取消到底层 timer，SleepFn 无取消契约）。
  * - 非正的 rpm/tpm/maxConcurrent 按不限流处理（fail-open：配置校验在 config.ts，限流器永不把宿主卡死）。
  * - 零依赖铁律：只 type-only import 本包 `src/config.ts` 的 `LimitDims`（运行时零 import）。
  */
@@ -28,7 +29,10 @@ const TPM_WINDOW_MS = 60_000;
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
-    setTimeout(resolve, ms);
+    const timer = setTimeout(resolve, ms);
+    // SleepFn 无取消契约：interruptibleSleep 早醒后这个 timer 照跑到点（到期 resolve 已 settle 即 no-op）。
+    // unref 让它不拖住进程退出——否则一次 abort 即留一个 60 秒 timer，测试进程与宿主退出都被拖住（审查修复）。
+    timer.unref?.();
   });
 }
 
