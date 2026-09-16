@@ -1,4 +1,4 @@
-# dsh-plugin-model-governor layer：模型治理面（服务端 + 浏览器半 v3：每卡一行 RPM，无其他 UI）。
+# dsh-plugin-model-governor layer：模型治理面（服务端 + 浏览器半 v5：每卡一行 RPM，无其他 UI）。
 # 空配置 = 自带行为：不限流 + opencode 系会话头默认开（与 dsh-opencode-session 默认一致）。
 - insert:
     - id: model-governor

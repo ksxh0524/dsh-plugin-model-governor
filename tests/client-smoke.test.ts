@@ -2,7 +2,7 @@
  *  用最小 React 桩驱动 lib/client.js 真 apply() 接线，断言：
  *  ① 只注册 provider-card keyed 槽（llm-pi-ai/llm-deepseek 各一位），绝不注册 footer；
  *  ② 单行渲染出 “RPM + 数字框 + 应用 + 探测”（读数取首模型生效 rpm；无清除、无探测行）；
- *  ③ 改框点应用调 configure({limits:{providers:{[route]:{rpm}}}})，空输入无操作；
+ *  ③ 改框点应用调 configure({limits:{providers:{[route]:{rpm}}}})，空输入点应用发 {rpm:null} 删除回落不限；
  *  ④ 点探测 → probe 发起 → 按钮变倒计时秒数（running 带 durationMs 做分母）；
  *     结论落地 → 按钮变回探测 + note 直显；倒计时点按 = 取消。
  *
@@ -200,7 +200,7 @@ test("渲染：治理单行（RPM+数字框+应用+探测），读数=首模型�
   void tree;
 });
 
-test("写入：改框点应用 → configure 服务商 rpm；空输入无操作", async () => {
+test("写入：改框点应用 → configure 服务商 rpm；空输入点应用 → {rpm:null} 删除回落不限", async () => {
   calls.configure.length = 0;
   render(regs[0].render({ provider: { provider: "opencode" } }));
   await flush();
@@ -220,14 +220,15 @@ test("写入：改框点应用 → configure 服务商 rpm；空输入无操作"
   const treeDone = render(regs[0].render({ provider: { provider: "opencode" } }));
   assert.equal(textOf(findAll(treeDone, (n) => n.type === "button")[0]), "应用");
   assert.equal(findAll(treeDone, (n) => n.type === "input")[0].props.value, "120");
-  // 空输入 = 无操作
+  // 空输入 = 删除该卡 RPM（{rpm:null} 回落不限，与占位符“空=不限”对齐）
   calls.configure.length = 0;
   input.props.onChange({ target: { value: "  " } });
   resetHooks();
   const tree3 = render(regs[0].render({ provider: { provider: "opencode" } }));
   findAll(tree3, (n) => n.type === "button")[0].props.onClick();
   await flush();
-  assert.equal(calls.configure.length, 0);
+  assert.equal(calls.configure.length, 1);
+  assert.deepEqual(calls.configure[0], { limits: { providers: { opencode: { rpm: null } } } });
 });
 
 test("探测：点探测 → 按钮变倒计时；结论落地 → 按钮变回探测 + note 直显", async () => {
@@ -275,6 +276,29 @@ test("探测：点探测 → 按钮变倒计时；结论落地 → 按钮变回�
     for (const handle of timers.splice(0)) g.clearInterval(handle);
     g.setInterval = realSetInterval;
     probeStatusScript = { state: "running", sent: 3, succeeded: 3, rateLimited: 0, elapsedMs: 3000, durationMs: 120000 };
+  }
+});
+
+test("包络分支：网关 {ok:true,value} 包裹的 describe 同样读数", async () => {
+  // 真网关把方法回执包成 {ok:true,value}（见 usage-stats 同款）；桩默认直返裸值，
+  // 本用例锁定 unwrap 的包络分支（裸值分支由其余用例覆盖）。
+  const origGet = ctxStub.get;
+  ctxStub.get = (name: string) => {
+    const remote = origGet(name);
+    return {
+      ...remote,
+      describe: async (f: any) => ({ ok: true, value: { models: [{ provider: f.provider, model: "m", limits: { rpm: 33 } }] } }),
+    };
+  };
+  try {
+    resetHooks();
+    render(regs[0].render({ provider: { provider: "opencode" } }));
+    await flush();
+    resetHooks();
+    const tree = render(regs[0].render({ provider: { provider: "opencode" } }));
+    assert.equal(findAll(tree, (n) => n.type === "input")[0].props.value, "33", "包络须解出内层读数");
+  } finally {
+    ctxStub.get = origGet;
   }
 });
 
