@@ -89,7 +89,16 @@ uiScenarioSuite({
         if (radius !== "14px" || height !== "28px") throw new Error(`按钮不是宿主 primitives 的 sm 规格（实得 r=${radius} h=${height}）——手搓替身或 CSS 打架`);
         if ((await page.evaluate(`document.querySelector(".gvr-row input")?.getAttribute("aria-label") || ""`)) !== "RPM")
           throw new Error("输入框缺 aria-label（席位范本：span 字段名 + aria-label）");
-        if (!text.includes("仅本次运行生效")) throw new Error("缺「仅本次运行」语义说明（本卡写运行时 live 配置，不落设置文档）");
+        // 单行横排是机器断言，不是靠眼睛：方向、子项同行、诊断位三件齐（模型卡竖排事故复盘）。
+        if ((await styleOf(page, ".gvr-row", "flexDirection")) !== "row") throw new Error("可写行不是横排（方向必须显式 row，不靠默认值）");
+        const ys = await page.evaluate(
+          `[...document.querySelector(".gvr-seat .gvr-row").children].map((el) => { const r = el.getBoundingClientRect(); return Math.round(r.top + r.height / 2); })`,
+        );
+        if (Math.max(...(ys as number[])) - Math.min(...(ys as number[])) > 12)
+          throw new Error(`同行四件不在一条水平线上（中线 y=${JSON.stringify(ys)}）——竖排/换行即红`);
+        if (!["host", "fallback"].includes(await page.evaluate(`document.querySelector(".gvr-seat")?.getAttribute("data-gvr-ui") || ""`)))
+          throw new Error("席位缺 data-gvr-ui 诊断位（必须自报走宿主件还是本地降级）");
+        if (!text.includes("重启 host 后恢复原值")) throw new Error("缺作用域人话（本卡写运行时 live 配置，不落设置文档）");
         await page.screenshot({ path: "/tmp/gov-seat.png" });
       },
     },
