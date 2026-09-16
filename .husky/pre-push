@@ -1,3 +1,8 @@
-# 全量行为验证：node --test（fixture 口径 + 真实会话集成；无会话目录自动 skip）。
-# 格式化/类型检查已在 pre-commit 阻断，这里只兜底行为不回退。
-pnpm test || exit 1
+# 工作区同源钩子——唯一真源是索引仓根 .husky，各仓原样复制。
+# 索引仓（docs/check.mjs 存在）无行为门：文档门已在 pre-commit 覆盖。
+# 代码仓：全量行为验证（各仓 test 脚本自带其口径；域仓根为四包逐仓 + 域门）。
+if [ -f docs/check.mjs ]; then
+  echo "[hooks] 索引仓 pre-push：无附加门（已由 pre-commit 文档门覆盖）"
+else
+  pnpm test || exit 1
+fi
