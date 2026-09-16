@@ -13,11 +13,14 @@
  *   `probeBypass`（run(true) 包住整次探测，监听器见 flag 即跳过 acquire、直接委托；
  *   同一进程的其他流量不在该上下文里，照常限流）。不用 options 暗记——瀑布是否
  *   clone options 是宿主实现细节，不可依赖。
- * - 探测两阶段（S5 probe.ts 纯函数 + 本文件编排）：A 阶段单并发连打（小 RPM 秒级定论，
- *   碰不到并发墙）→ B 阶段并行加倍 burst（大水管才进，累计成功数逼近窗口值）→
- *   burst 见 429 则暂停后单并发确认（确认也 429 = 窗口真满；确认通过 = 死于并发墙）。
- *   只有亲眼见到 429（触顶）才自动填入 provider 级 rpm（远端刚演示的事实：N 个放行、
- *   第 N+1 个被拒）；未触顶只报告下限、不写配置（没证实的数写进去才是错）。
+ * - 探测两阶段（S5 probe.ts 纯函数 + 本文件编排）：v2 RPS 爬坡 pacer（起始 2 RPS、
+ *   每秒 +1、封顶 20 RPS，发送时刻均匀摊开、速率与 RTT 无关；旧串行把速率绑死在
+ *   1/RTT 上，1 秒 1 个一分钟最多 60 发，大 RPM 永远够不着；burst 尖峰先撞秒级墙）。
+ *   累计发送数逼近窗口值，见 429 则暂停后单并发确认（确认也 429 = 窗口真满；
+ *   确认通过 = 死于并发墙；低并发低速率见 429 可跳过确认）。只有亲眼见到 429
+ *   （触顶）才自动填入 provider 级 rpm（远端刚演示的事实：N 个放行、第 N+1 个被拒）；
+ *   未触顶只报告下限、不写配置（没证实的数写进去才是错）。
+ *   成功时刻记**开始时刻**（RPM 窗数的是发送时刻，记完成时刻 RTT 大时系统性偏小）。
  *   单服务商单飞行（busy 直接回，不排队）；取消走 AbortController + cancelProbe。
  * - Remote 两件套手搓（零依赖铁律：禁 import `@deepseek-ai/cordis` / `dsh-typert-protocol`，
  *   写法照抄 plugin-usage-stats/src/cordis.ts）：① 实例字段 `typertRemote`；② 原型字符串键
@@ -64,7 +67,7 @@ import {
 import { TokenBuckets } from "./limiter.ts";
 import { SESSION_HEADER, headerValueFor, patchFetch, withStore, type SessionHeaderMode, type SessionHeaderStore } from "./session-header.ts";
 import { buildDescribeInput, type DescribeInput } from "./describe-input.ts";
-import { classifyFinishReason, classifyThrown, normalizeProbeSpec, summarizeProbe, type ProbeCallOutcome, type ProbeSpec } from "./probe.ts";
+import { classifyFinishReason, classifyThrown, normalizeProbeSpec, rampRps, summarizeProbe, type ProbeCallOutcome, type ProbeSpec } from "./probe.ts";
 
 /** bundle 行 config 形（cordis.patch.yml 的 config 段与此对齐；空对象 = 自带行为）。 */
 export type CordisConfig = GovernorConfig;
@@ -204,6 +207,7 @@ interface ProbeRun {
   sent: number;
   succeeded: number;
   rateLimited: number;
+  /** 每次成功请求的**开始时刻**（升序；RPM 窗数发送时刻，见 probe.ts）。 */
   successTimes: number[];
   controller: AbortController;
 }
@@ -572,9 +576,11 @@ export class GovernorService {
     };
   }
 
-  /** 单次探测调用：发一个极小请求并排干流，按终端块判定（宿主约定失败只以 finish/error 落地）。 */
+  /** 单次探测调用：发一个极小请求并排干流，按终端块判定（宿主约定失败只以 finish/error 落地）。
+   *  成功时刻记**开始时刻**（RPM 窗数的是发送时刻，不是完成时刻）。 */
   private async singleProbeCall(run: ProbeRun): Promise<ProbeCallOutcome> {
     const llm = this.llmFace();
+    const startedAt = Date.now();
     run.sent += 1;
     let judged: ProbeCallOutcome;
     try {
@@ -586,7 +592,7 @@ export class GovernorService {
     // 否则 probeStatus 快照与结论自相矛盾（审查修复）。
     if (judged.outcome === "success") {
       run.succeeded += 1;
-      run.successTimes.push(Date.now());
+      run.successTimes.push(startedAt);
     } else if (judged.outcome === "rateLimited") {
       run.rateLimited += 1;
     }
@@ -635,80 +641,108 @@ export class GovernorService {
     return true;
   }
 
-  /** 探测编排（后台跑，全程在 probeBypass ALS 里）：A 单发 → B burst → 确认 → 汇总 → 触顶自动填入。 */
+  /** 探测编排（后台跑，全程在 probeBypass ALS 里）：RPS 爬坡 ramp → 确认 → 汇总 → 触顶自动填入。
+   *
+   *  为什么是爬坡而不是串行：串行速率恒为 1/RTT，一秒一个一分钟最多 60 发，
+   *  大 RPM 永远够不着；burst 尖峰（32 发/1.6s）先撞秒级墙。pacer 按发送速率爬坡
+   *  （起始 rampStartRps、每 rampStepMs 加 rampStepRps、封顶 maxRps），发送时刻均匀
+   *  摊开、速率与 RTT 无关（并发 = RPS × RTT，由 maxInflight 限幅，50 硬顶）。
+   *  RPM 30 约 6 秒、60 约 9 秒、300 约 23 秒，全程 <60 秒。 */
   private async executeProbe(run: ProbeRun): Promise<ProbeResult> {
     const { spec, controller } = run;
     const signal = controller.signal;
+    let rampLimitedAt: number | null = null;
+    let limitedRps = 0;
+    let limitedInflight = 0;
     let limitedAt: number | null = null;
     let failure: { code: string; message: string } | undefined;
     let concurrencyNote: string | undefined;
 
-    // A 阶段：单并发连打（小 RPM 在此定论；单发永远碰不到并发墙，429 只可能是窗口满）。
-    for (let i = 0; i < spec.phaseA && this.probeBudgetLeft(run); i += 1) {
-      const judged = await this.singleProbeCall(run);
-      if (judged.outcome === "rateLimited") {
-        limitedAt = Date.now();
-        break;
+    // ramp 阶段：pacer 按速率爬坡开火，在飞满了就等最早落定的，不再开新发。
+    {
+      let nextStart = run.startedAt;
+      const pending = new Set<Promise<ProbeCallOutcome>>();
+      const onSettled = (judged: ProbeCallOutcome, inflightNow: number, rpsNow: number): void => {
+        if (judged.outcome === "rateLimited" && rampLimitedAt === null) {
+          rampLimitedAt = Date.now();
+          limitedRps = rpsNow;
+          limitedInflight = inflightNow;
+        } else if (judged.outcome === "failed" && failure === undefined) {
+          failure = { code: judged.code, message: judged.message };
+        }
+      };
+      const launch = (): void => {
+        const elapsed = Date.now() - run.startedAt;
+        const rpsNow = rampRps(spec, elapsed);
+        const p = this.singleProbeCall(run);
+        pending.add(p);
+        void p.then(
+          (judged) => {
+            const inflightNow = pending.size;
+            pending.delete(p);
+            onSettled(judged, inflightNow, rpsNow);
+          },
+          (err: unknown) => {
+            pending.delete(p);
+            if (failure === undefined) failure = { code: "UNKNOWN", message: errorOf(err) };
+          },
+        );
+      };
+      for (;;) {
+        if (signal.aborted || failure !== undefined || rampLimitedAt !== null) break;
+        if (!this.probeBudgetLeft(run)) break;
+        const elapsed = Date.now() - run.startedAt;
+        const rps = rampRps(spec, elapsed);
+        const interval = 1000 / Math.max(1, rps);
+        const now = Date.now();
+        if (pending.size >= spec.maxInflight) {
+          // 在飞满：等最早落定的一个（它的 then 里会清 pending、记 limitedAt/failure）。
+          const waiting = [...pending];
+          await Promise.race(waiting);
+          continue;
+        }
+        if (now >= nextStart) {
+          // 掉队太多（被 inflight 反压太久）不补发——补发即尖峰，直接按现在重排。
+          if (nextStart < now - interval) nextStart = now;
+          launch();
+          nextStart += interval;
+          continue;
+        }
+        await this.abortableSleep(Math.min(nextStart - now, 100), signal);
       }
-      if (judged.outcome === "failed") {
-        failure = { code: judged.code, message: judged.message };
-        break;
-      }
-      if (judged.outcome === "cancelled") break;
+      // 收尾：在飞的全部落定（它们的计数已在 singleProbeCall 里落数，这里只等）。
+      if (pending.size > 0) await Promise.allSettled([...pending]);
     }
 
-    // B 阶段：并行加倍 burst（A 全过才进；累计成功数逼近窗口值）。
-    if (limitedAt === null && failure === undefined && !signal.aborted) {
-      for (const size of spec.bursts) {
-        if (!this.probeBudgetLeft(run)) break;
-        let burstLimited = 0;
-        let burstFailed: { code: string; message: string } | undefined;
-        let launched = 0;
-        const room = Math.min(size, spec.maxRequests - run.sent);
-        const calls: Array<Promise<ProbeCallOutcome>> = [];
-        for (let k = 0; k < room; k += 1) {
-          if (!this.probeBudgetLeft(run)) break;
-          if (k > 0 && spec.staggerMs > 0) {
-            const slept = await this.abortableSleep(spec.staggerMs, signal);
-            if (!slept) break;
-          }
-          launched += 1;
-          calls.push(this.singleProbeCall(run));
-        }
-        const settled = await Promise.all(calls);
-        for (const judged of settled) {
-          if (judged.outcome === "rateLimited") burstLimited += 1;
-          else if (judged.outcome === "failed" && burstFailed === undefined) {
-            burstFailed = { code: judged.code, message: judged.message };
-          }
-        }
-        if (signal.aborted) break;
-        if (burstFailed !== undefined) {
-          failure = burstFailed;
-          break;
-        }
-        if (burstLimited === 0) continue; // 整 burst 全过：下限抬高，下一档
-        // burst 见 429：暂停让窗口稍滑，再单并发确认（分清 RPM 满 vs 并发墙）。
+    // 确认阶段：ramp 见 429 后分清 RPM 满 vs 并发墙。
+    if (rampLimitedAt !== null && failure === undefined && !signal.aborted) {
+      const skipConfirm = limitedInflight <= 3 && limitedRps <= 5;
+      if (skipConfirm) {
+        // 低并发低速率见 429：不可能是并发墙，免确认（省 2 秒 + 3 发）。
+        limitedAt = rampLimitedAt;
+      } else {
         await this.abortableSleep(spec.confirmPauseMs, signal);
-        if (signal.aborted) break;
-        let confirmed = false;
-        for (let c = 0; c < spec.confirmCount && this.probeBudgetLeft(run); c += 1) {
-          const judged = await this.singleProbeCall(run);
-          if (judged.outcome === "rateLimited") {
-            limitedAt = Date.now();
-            confirmed = true;
-            break;
+        if (!signal.aborted) {
+          let confirmed = false;
+          for (let c = 0; c < spec.confirmCount && this.probeBudgetLeft(run); c += 1) {
+            const judged = await this.singleProbeCall(run);
+            if (judged.outcome === "rateLimited") {
+              limitedAt = Date.now();
+              confirmed = true;
+              break;
+            }
+            if (judged.outcome === "failed") {
+              failure = { code: judged.code, message: judged.message };
+              break;
+            }
+            if (judged.outcome === "cancelled") break;
           }
-          if (judged.outcome === "failed") {
-            failure = { code: judged.code, message: judged.message };
-            break;
+          if (limitedAt === null && failure === undefined && !signal.aborted) {
+            // 确认全过：ramp 死于并发墙（RPM 未触顶）；更大速率只会再撞墙，停。
+            concurrencyNote = `并行约 ${limitedInflight} 个（当时 ${limitedRps} RPS）被限但单发正常，疑似该服务商并发墙，RPM 未触顶`;
           }
-          if (judged.outcome === "cancelled") break;
+          void confirmed;
         }
-        if (limitedAt !== null || failure !== undefined || signal.aborted) break;
-        // 确认全过：burst 死于并发墙（RPM 未触顶）；更大 burst 只会再撞墙，停 B。
-        concurrencyNote = `并行 ${launched} 个被限但单发正常，疑似该服务商并发墙（<${launched}），RPM 未触顶`;
-        break;
       }
     }
 
@@ -910,8 +944,9 @@ function installLlmStreamListener(ctx: any, service: GovernorService): void {
         } catch (err) {
           // 第二次 acquire 失败（abort 落在两次取令牌之间）：第一次已占的并发槽必须归还，
           // 否则 maxConcurrent 的 inflight 永久 +1，反复命中把该 key 彻底卡死（审查修复）。
-          // RPM/TPM 滑窗占位不在此撤销（limiter 无 revoke 语义），60 秒自然滑出、可接受。
+          // RPM/TPM 滑窗占位同样回滚——请求根本没发出去，白占 60 秒会把 provider 桶堵小（v2 修复）。
           service.buckets.release(providerKey);
+          service.buckets.revoke(providerKey, reserve);
           throw err;
         }
       }
@@ -920,8 +955,11 @@ function installLlmStreamListener(ctx: any, service: GovernorService): void {
         downstream = next();
       } catch (err) {
         if (!bypassed) {
+          // next() 同步抛 = 请求没发出去：并发槽归还 + RPM/TPM 占位回滚（v2 revoke）。
           service.buckets.release(providerKey);
           service.buckets.release(modelKey);
+          service.buckets.revoke(providerKey, reserve);
+          service.buckets.revoke(modelKey, reserve);
         }
         service.noteOutcome(providerKey, err);
         throw err;

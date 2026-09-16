@@ -7,9 +7,21 @@
  * - 每个 key 独立维护：60 秒滑窗内的放行时刻（RPM）、滑窗内的 token 占位（TPM）、当前持有人数（并发），
  *   外加一条 FIFO 等待队列。队头不满足条件就睡到“最早可能放行的时刻”再看，绝不抛错拒绝；
  *   只有调用方 `abort` 才放弃排队并以 `signal.reason` 抛错。
+ * - RPM 槽 vs 并发槽（必读，用户问过）：
+ *   ```text
+ *   请求 A 在 10:00:00 放行 → 记 RPM 槽（发time）+ 并发槽 +1
+ *     ├─ RPM 槽：只活 60 秒，到 10:01:00 过期，与 A 跑完没跑完无关
+ *     └─ 并发槽：活到 A 结束调 release() 为止（跑 90 秒就占 90 秒）
+ *   10:00:59 来 B：窗内已有 A → B 等 1 秒；10:01:00 A 的 RPM 槽滑出 → B 放行
+ *   （即使 A 还在跑，只要并发槽没满）。“开始处理就不占了”说的是并发槽，
+ *   RPM 槽必须占满 60 秒——否则 1000 RPS、每次 10ms 跑完，RPM 永远是 1，
+ *   远端网关可不这么算（照样 429）。
+ *   ```
  * - TPM 预占数是估计值：调用方传 `options.maxTokens ?? 0`（实际用量只有流结束后才知道，事前只能按上限占位，
  *   偏保守；若单次预占超过桶容量，等窗内其它占位滑出后仍放行，保证永不饿死）。
  * - 并发槽的释放靠调用方在 gated 工作结束后调 `release(key)`（cordis 侧放 `finally` 里）；多调无害（钳在 0）。
+ *   RPM/TPM 槽一旦记下、请求最终没发出去（如双桶第二次 acquire 被 abort、`next()` 同步抛），
+ *   调用方必须调 `revoke(key, reserveTokens)` 回滚，否则 phantom 白占 60 秒（审查修复）。
  * - 时钟与睡眠均可注入：生产用 `Date.now` + `setTimeout`，单测用假时钟 + 手动 fire 的睡眠，
  *   断言“等了多久”这类真实语义，而不是凑绿。默认睡眠 `unref`：abort 早醒后残留的 timer
  *   不拖住进程退出（不断言取消到底层 timer，SleepFn 无取消契约）。
@@ -126,6 +138,27 @@ export class TokenBuckets {
     const st = this.states.get(key);
     if (!st || st.inflight <= 0) return;
     st.inflight -= 1;
+    this.notify(st);
+    this.pump(key, st);
+  }
+
+  /** 回滚一次 acquire 记下的 RPM/TPM 槽（请求最终没发出去时用：双桶第二次 acquire
+   *  被 abort、`next()` 同步抛。正常放行/远端已计数一律不调。
+   *  近似语义：删最新的一条（phantom 总是刚授予的，并发交错也只差毫秒级，
+   *  60 秒窗下误差可忽略）。TPM 按 reserveTokens 从尾找第一条同值删，找不到不动。
+   *  未知 key / 空窗一律忽略，不抛。删完即 pump（可能正好放行队头）。 */
+  revoke(key: string, reserveTokens = 0): void {
+    const st = this.states.get(key);
+    if (!st) return;
+    if (st.starts.length > 0) st.starts.pop();
+    if (reserveTokens > 0) {
+      for (let i = st.tokens.length - 1; i >= 0; i -= 1) {
+        if (st.tokens[i].n === reserveTokens) {
+          st.tokens.splice(i, 1);
+          break;
+        }
+      }
+    }
     this.notify(st);
     this.pump(key, st);
   }

@@ -185,6 +185,28 @@ test("TPM 预占位：窗内 token 超了就等，窗空了超配也放（永不
   assert.equal(sleeps.length, 0, "窗内无竞争时单次超配也放行（再等也腾不出配额，不饿死）");
 });
 
+test("revoke 回滚 phantom：没发出去的占位不白占 60 秒", async () => {
+  const { buckets, sleeps, tick, fireAll, advance } = setup();
+  await buckets.acquire("revoke-rpm", { rpm: 1 });
+  // 第二个请求本该等一窗：phantom 回滚后应直接过。
+  buckets.revoke("revoke-rpm");
+  await buckets.acquire("revoke-rpm", { rpm: 1 });
+  assert.equal(sleeps.length, 0, "revoke 后 RPM 槽已还，不该再排队");
+  // TPM 占位同样回滚（同值从尾删）。
+  await buckets.acquire("revoke-tpm", { tpm: 100 }, undefined, 60);
+  buckets.revoke("revoke-tpm", 60);
+  await buckets.acquire("revoke-tpm", { tpm: 100 }, undefined, 60);
+  assert.equal(sleeps.length, 0, "TPM 占位回滚后不该排队");
+  // 未知 key / 空窗 revoke 不抛。
+  assert.doesNotThrow(() => {
+    buckets.revoke("no-such-key");
+    buckets.revoke("revoke-rpm");
+  });
+  await tick();
+  await fireAll();
+  advance(1000);
+});
+
 test("abort 早醒不拖进程：默认睡眠 timer 一律 unref", async () => {
   // 断真实语义：排队 abort 后残留的真 timer 不得持有事件循环（曾拖住测试进程 60 秒）。
   // 包一层 setTimeout 如实记录（ms 照传、handle 照回），只看长 timer 是否 unref。

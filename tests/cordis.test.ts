@@ -11,7 +11,7 @@
  *     不读模型元数据、不抛）；
  *  ⑥ configure 写回（非法补丁中文拒收；思考键已移除、再传按未知键拒收；某维 null=删除回落；
  *     live 限流即时生效）；
- *  ⑦ probe 两阶段探测（小 RPM 单发定论、大水管 burst 逼近；触顶自动填入 provider 级 rpm，
+ *  ⑦ probe RPS 爬坡探测（速率与 RTT 无关、大 RPM 可达；触顶自动填入 provider 级 rpm，
  *     未触顶/失败/取消一律不写；单飞行 busy；cancelProbe 取消）。
  *
  * fetch 说明：applyCordis 会补丁 globalThis.fetch（header 机制本体的另一半）；模块级 after 钩子
@@ -416,6 +416,40 @@ test("监听：第二次 acquire 失败归还第一桶（abort 落在两 acquire
   assert.deepEqual(chunks, ["x"]);
 });
 
+test("监听：第二次 acquire 失败回滚第一桶 RPM（phantom 不白占 60 秒）", async () => {
+  const { ctx, listeners } = makeCtx({ llm: makeLlm() });
+  const svc = applyCordis(ctx, { limits: { providers: { p: { rpm: 1 } }, models: { "p/m": { rpm: 1 } } } });
+  const onStream = streamListenerOf(listeners);
+  // 占住模型桶：下一个 p/m 请求必在第二次 acquire 处排队（第一桶已授予）。
+  await svc.buckets.acquire("p/m", { rpm: 1 });
+  const controller = new AbortController();
+  const queued = drain(
+    (onStream as any)({ provider: "p", model: "m", signal: controller.signal }, () =>
+      (async function* () {
+        yield "never";
+      })(),
+    ),
+  );
+  await new Promise((r) => setTimeout(r, 50));
+  controller.abort(new Error("between-acquires-rpm"));
+  await assert.rejects(queued, "排队的请求应随 abort 撤出");
+  svc.buckets.release("p/m");
+  svc.buckets.revoke("p/m");
+  // 若第一桶 RPM 没回滚（phantom），provider 桶仍记一次、p/other 会被卡 60 秒。
+  const chunks = await withTimeout(
+    drain(
+      (onStream as any)({ provider: "p", model: "other" }, () =>
+        (async function* () {
+          yield "x";
+        })(),
+      ),
+    ),
+    2000,
+    "第一桶 phantom 未回滚：provider RPM 被没发出去的请求白占",
+  );
+  assert.deepEqual(chunks, ["x"]);
+});
+
 test("监听：消费方提前 return 也 exactly-once 上报（取消不丢信号、正常读完不 double）", async () => {
   const { ctx, listeners } = makeCtx({ llm: makeLlm() });
   const svc = applyCordis(ctx, {}) as GovernorService;
@@ -554,7 +588,7 @@ async function waitProbeDone(svc: GovernorService, provider: string, timeoutMs =
   }
 }
 
-test("probe：小 RPM 单发定论（3 成功后 429 → 估计 3 并自动填入）", async () => {
+test("probe：小 RPM 爬坡定论（3 成功后 429 → 估计 3 并自动填入）", async () => {
   const { ctx } = makeCtx({ llm: undefined });
   const svc = applyCordis(ctx, {});
   const stub = makeProbeLlm((n) => (n < 3 ? "ok" : "limited"));
@@ -562,7 +596,7 @@ test("probe：小 RPM 单发定论（3 成功后 429 → 估计 3 并自动填�
     (_inner: unknown) => (_name: string) =>
       _inner
   )(stub);
-  const started = await svc.probe({ provider: "p", phaseA: 10, bursts: [], maxRequests: 20 });
+  const started = await svc.probe({ provider: "p", maxRequests: 20 });
   assert.equal(started.ok, true);
   const result = await waitProbeDone(svc, "p");
   assert.equal(result.topped, true);
@@ -577,6 +611,38 @@ test("probe：小 RPM 单发定论（3 成功后 429 → 估计 3 并自动填�
   for (const options of stub.seen) assert.equal(options.maxTokens, 16);
 });
 
+test("probe：爬坡可测大 RPM（旧串行一秒一个够不着 60，pacer 直达）", async () => {
+  const { ctx } = makeCtx({ llm: undefined });
+  const svc = applyCordis(ctx, {});
+  // 远端真 RPM 60：前 60 放行、第 61 个起 429；高速爬坡 20 RPS，~3 秒触顶。
+  const stub = makeProbeLlm((n) => (n < 60 ? "ok" : "limited"));
+  ctx.get = (
+    (_inner: unknown) => (_name: string) =>
+      _inner
+  )(stub);
+  assert.equal((await svc.probe({ provider: "p", rampStartRps: 20, maxRps: 20, maxRequests: 100 })).ok, true);
+  const result = await waitProbeDone(svc, "p", 20000);
+  assert.equal(result.topped, true);
+  assert.equal(result.estimate, 60);
+  assert.equal(result.appliedRpm, 60);
+});
+
+test("probe：慢 RTT 下速率不塌（RTT 200ms + RPM 30，串行要 6 秒，pacer 高速档 2 秒内触顶）", async () => {
+  const { ctx } = makeCtx({ llm: undefined });
+  const svc = applyCordis(ctx, {});
+  const stub = makeProbeLlm((n) => (n < 30 ? "ok" : "limited"), 200);
+  ctx.get = (
+    (_inner: unknown) => (_name: string) =>
+      _inner
+  )(stub);
+  const begin = Date.now();
+  assert.equal((await svc.probe({ provider: "p", rampStartRps: 20, maxRps: 20, maxRequests: 60 })).ok, true);
+  const result = await waitProbeDone(svc, "p", 20000);
+  assert.equal(result.topped, true);
+  assert.equal(result.estimate, 30);
+  assert.ok(Date.now() - begin < 8000, `慢 RTT 也不该拖（实耗 ${Date.now() - begin}ms）`);
+});
+
 test("probe：maxTokens 可调（网关下限各异时透传自定义值）", async () => {
   const { ctx } = makeCtx({ llm: undefined });
   const svc = applyCordis(ctx, {});
@@ -585,7 +651,7 @@ test("probe：maxTokens 可调（网关下限各异时透传自定义值）", as
     (_inner: unknown) => (_name: string) =>
       _inner
   )(stub);
-  assert.equal((await svc.probe({ provider: "p", phaseA: 2, bursts: [], maxRequests: 2, maxTokens: 32 })).ok, true);
+  assert.equal((await svc.probe({ provider: "p", maxRequests: 2, maxTokens: 32 })).ok, true);
   await waitProbeDone(svc, "p");
   assert.equal(stub.seen.length, 2);
   for (const options of stub.seen) assert.equal(options.maxTokens, 32);
@@ -606,7 +672,7 @@ test("probe：端到端走真监听器（本地 rpm=1 不污染探测）", async
     listModels: async () => [{ id: "m" }],
     stream: (options: any) => (onStream as any)(options, () => scripted.stream(options)),
   });
-  const started = await svc.probe({ provider: "p", phaseA: 5, bursts: [], maxRequests: 5 });
+  const started = await svc.probe({ provider: "p", maxRequests: 5 });
   assert.equal(started.ok, true);
   const result = await waitProbeDone(svc, "p", 10000);
   assert.equal(n, 5);
@@ -622,7 +688,7 @@ test("probe：配额见底停探不写（QUOTA≠RPM）", async () => {
     (_inner: unknown) => (_name: string) =>
       _inner
   )(makeProbeLlm(() => "quota"));
-  assert.equal((await svc.probe({ provider: "p", phaseA: 5, bursts: [] })).ok, true);
+  assert.equal((await svc.probe({ provider: "p", maxRequests: 10 })).ok, true);
   const result = await waitProbeDone(svc, "p");
   assert.equal(result.topped, false);
   assert.equal(result.applied, false);
@@ -638,14 +704,14 @@ test("probe：单飞行 busy + cancelProbe 取消", async () => {
     (_inner: unknown) => (_name: string) =>
       _inner
   )(makeProbeLlm(() => "ok", 30));
-  assert.equal((await svc.probe({ provider: "p", phaseA: 30, bursts: [], maxRequests: 30 })).ok, true);
-  const busy = await svc.probe({ provider: "p", phaseA: 1 });
+  assert.equal((await svc.probe({ provider: "p", maxRequests: 30 })).ok, true);
+  const busy = await svc.probe({ provider: "p", rampStartRps: 2 });
   assert.equal(busy.ok, false);
   assert.match(busy.errors.join("；"), /已有探测在跑/);
   const running = await svc.probeStatus({ provider: "p" });
   assert.equal(running.state, "running");
   assert.ok((running.sent ?? 0) >= 0);
-  assert.equal(running.durationMs, 120000, "running 带 durationMs（UI 倒计时分母）");
+  assert.equal(running.durationMs, 60000, "running 带 durationMs（UI 倒计时分母，一整窗）");
   assert.deepEqual(await svc.cancelProbe({ provider: "p" }), { ok: true, cancelled: true, errors: [] });
   const result = await waitProbeDone(svc, "p");
   assert.equal(result.cancelled, true);
@@ -666,7 +732,7 @@ test("probe：bare-done 成功同样计数（无 finish 块直接结束不丢数
         yield "chunk";
       })(),
   });
-  assert.equal((await svc.probe({ provider: "p", phaseA: 3, bursts: [], maxRequests: 3 })).ok, true);
+  assert.equal((await svc.probe({ provider: "p", maxRequests: 3 })).ok, true);
   const result = await waitProbeDone(svc, "p");
   assert.equal(n, 3);
   assert.equal(result.topped, false);
@@ -684,19 +750,22 @@ test("probe：抛错路径的限流同样计数（rateLimited 落数）", async 
       throw Object.assign(new Error("429 slow down"), { code: "RATE_LIMIT" });
     },
   });
-  assert.equal((await svc.probe({ provider: "p", phaseA: 5, bursts: [] })).ok, true);
+  assert.equal((await svc.probe({ provider: "p", maxRequests: 10 })).ok, true);
   const result = await waitProbeDone(svc, "p");
   assert.equal(result.topped, true);
   assert.ok(result.rateLimited >= 1, "抛错路径的 429 必须计入 rateLimited（曾只在 finish 块路径计数）");
   assert.equal(result.applied, false, "零成功触顶不填入");
 });
 
-test("probe：非法参数中文拒收；status/cancel 无 provider 行为", async () => {
+test("probe：非法参数中文拒收；旧两阶段键指路新键；status/cancel 无 provider 行为", async () => {
   const { ctx } = makeCtx({ llm: makeLlm() });
   const svc = applyCordis(ctx, {});
-  const bad = await svc.probe({ phaseA: 999 });
+  const bad = await svc.probe({ rampStartRps: 999 });
   assert.equal(bad.ok, false);
   for (const message of bad.errors) assert.match(message, /[一-鿿]/);
+  const removed = await svc.probe({ provider: "p", phaseA: 10 });
+  assert.equal(removed.ok, false);
+  assert.match(removed.errors.join("；"), /已移除/);
   assert.deepEqual(await svc.probeStatus({ provider: "never-ran" }), { state: "idle" });
   assert.deepEqual(await svc.probeStatus({}), { state: "idle" });
   const noTarget = await svc.cancelProbe({});
@@ -804,7 +873,7 @@ test("持久化：probe 触顶自动填入同样落盘（与手点应用同一�
     (_inner: unknown) => (_name: string) =>
       _inner
   )(stub);
-  assert.equal((await svc.probe({ provider: "p", phaseA: 10, bursts: [], maxRequests: 20 })).ok, true);
+  assert.equal((await svc.probe({ provider: "p", maxRequests: 20 })).ok, true);
   const result = await waitProbeDone(svc, "p");
   assert.equal(result.topped, true);
   assert.equal(result.applied, true);
