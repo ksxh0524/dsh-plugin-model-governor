@@ -47,7 +47,7 @@ The plugin row lives in the profile's `cordis.patch.yml` (or the bundle default,
 
 ## GUI
 
-Two lines per provider card on Settings → Models: the RPM row (`RPM 上限` + number box + `应用` + `清除`) and the probe row (`探测` + progress/cancel + one-line verdict); nothing else — no titles, badges, or footer panels. Empty input = unlimited. Configure via `settings.yaml` (see Configure above).
+One line per provider card on Settings → Models: `RPM` + number box + `应用` + `探测`; nothing else — no titles, badges, or footer panels. Clicking `探测` turns the button itself into a remaining-seconds countdown (click again to cancel); when it ends or fails the button flips back to `探测` with a one-line verdict below (auto-applied on topped runs). Empty input = unlimited. Configure via `settings.yaml` (see Configure above).
 
 ## Credits
 

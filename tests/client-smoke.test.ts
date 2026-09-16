@@ -1,15 +1,13 @@
-/** client-smoke.test.ts —— RPM 单行 + 探测行冒烟（无头、无 DOM，全桩）：
+/** client-smoke.test.ts —— 治理单行冒烟（无头、无 DOM，全桩）：
  *  用最小 React 桩驱动 lib/client.js 真 apply() 接线，断言：
  *  ① 只注册 provider-card keyed 槽（llm-pi-ai/llm-deepseek 各一位），绝不注册 footer；
- *  ② RpmLine 渲染出 “RPM 上限 + 数字框 + 应用 + 清除” 单行（读数取首模型生效 rpm）；
+ *  ② 单行渲染出 “RPM + 数字框 + 应用 + 探测”（读数取首模型生效 rpm；无清除、无探测行）；
  *  ③ 改框点应用调 configure({limits:{providers:{[route]:{rpm}}}})，空输入无操作；
- *     点清除调 configure({…:{rpm:null}}) 并回读空；
- *  ④ ProbeLine 渲染出“探测”行：点探测 → probe 发起 → probeStatus 结论直显。
+ *  ④ 点探测 → probe 发起 → 按钮变倒计时秒数（running 带 durationMs 做分母）；
+ *     结论落地 → 按钮变回探测 + note 直显；倒计时点按 = 取消。
  *
  *  桩说明：react 不在 dependencies（浏览器半只 require("react") 宿主供给），此处手写桩；
- *  useEffect 收集后手动 flush（含异步 describe 的 macrotask 排空）。
- *  跨行事件（window CustomEvent）在桩 window 上不存在：emitRpmChanged/订阅均有守卫，
- *  冒烟不断跨行联动（真浏览器覆盖），只断各行本体。 */
+ *  useEffect 收集后手动 flush（含异步 describe 的 macrotask 排空）。 */
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -41,6 +39,9 @@ function useState<T>(init: T): [T, (v: T | ((p: T) => T)) => void] {
 function resetHooks() {
   stateSeq = 0;
 }
+// useRef 与 useState 共用序号：真 React 的 ref 跨渲染稳定，桩必须同语义，
+// 否则组件的 probing/poller 等跨渲染守卫在桩里永远失灵（倒计时点按取消即因此假失败过）。
+const refCells = new Map<number, { current: unknown }>();
 function useEffect(fn: () => unknown, _deps?: unknown) {
   pendingEffects.push(fn);
 }
@@ -48,7 +49,9 @@ function useCallback<T>(fn: T, _deps?: unknown): T {
   return fn;
 }
 function useRef<T>(init: T): { current: T } {
-  return { current: init };
+  const id = stateSeq++;
+  if (!refCells.has(id)) refCells.set(id, { current: init });
+  return refCells.get(id) as { current: T };
 }
 function createElement(type: any, props: any, ...children: any[]) {
   return { type, props: { ...(props ?? {}), children: children.flat() } };
@@ -123,8 +126,8 @@ const calls: { describe: any[]; configure: any[]; probe: any[]; probeStatus: any
   cancelProbe: [],
 };
 let rpmValue: number | undefined = 60;
-/** 桩 probeStatus 的剧本（用例按需改写：running 态或 done 结论）。 */
-let probeStatusScript: any = { state: "running", sent: 3, succeeded: 3, rateLimited: 0 };
+/** 桩 probeStatus 的剧本（用例按需改写：running 态或 done 结论；running 带 durationMs 做倒计时分母）。 */
+let probeStatusScript: any = { state: "running", sent: 3, succeeded: 3, rateLimited: 0, elapsedMs: 3000, durationMs: 120000 };
 const ctxStub: any = {
   remote: { $mount: () => Promise.resolve({}) },
   get: (name: string) => {
@@ -175,7 +178,7 @@ test("注册面：只挂 provider-card keyed 槽（两命名空间各一位）�
   assert.deepEqual(regs.map((r) => r.options.key).sort(), ["llm-deepseek", "llm-pi-ai"]);
 });
 
-test("渲染：RPM 单行（标签+数字框+应用），读数=首模型生效 rpm", async () => {
+test("渲染：治理单行（RPM+数字框+应用+探测），读数=首模型生效 rpm", async () => {
   resetHooks();
   const tree = render(regs[0].render({ provider: { provider: "opencode" } }));
   await flush();
@@ -186,11 +189,13 @@ test("渲染：RPM 单行（标签+数字框+应用），读数=首模型生效 
   const inputs = findAll(tree2, (n) => n.type === "input");
   assert.equal(inputs.length, 1);
   assert.equal(inputs[0].props.value, "60");
-  const btns = findAll(tree2, (n) => n.type === "button" && textOf(n) === "应用");
-  assert.equal(btns.length, 1);
-  // 无卡片标题/徽标/多行：div.gvr-rpm 唯一，且无 footer 残留文本
+  const btns = findAll(tree2, (n) => n.type === "button");
+  assert.deepEqual(btns.map(textOf), ["应用", "探测"], "同行两按钮：应用在前、探测在后，无清除");
+  assert.ok(btns[1].props.title.includes("自动测 RPM"), "探测按钮 title 说明用途");
+  // 无卡片标题/徽标/多行：div.gvr-rpm 唯一，无探测行残留，且无 footer 残留文本
   const roots = findAll(tree2, (n) => n.props?.className === "gvr-rpm");
   assert.equal(roots.length, 1);
+  assert.equal(findAll(tree2, (n) => n.props?.className === "gvr-probe").length, 0);
   assert.ok(!textOf(tree2).includes("全局"));
   void tree;
 });
@@ -225,40 +230,8 @@ test("写入：改框点应用 → configure 服务商 rpm；空输入无操作"
   assert.equal(calls.configure.length, 0);
 });
 
-test("渲染：探测行（探测按钮 + 说明）与 RPM 行清除按钮", async () => {
-  resetHooks();
-  render(regs[0].render({ provider: { provider: "opencode" } }));
-  await flush();
-  resetHooks();
-  const tree = render(regs[0].render({ provider: { provider: "opencode" } }));
-  const probeRoots = findAll(tree, (n) => n.props?.className === "gvr-probe");
-  assert.equal(probeRoots.length, 1);
-  const probeBtns = findAll(tree, (n) => n.type === "button" && textOf(n) === "探测");
-  assert.equal(probeBtns.length, 1);
-  assert.ok(textOf(tree).includes("自动测 RPM 并填入"));
-  const clearBtns = findAll(tree, (n) => n.type === "button" && textOf(n) === "清除");
-  assert.equal(clearBtns.length, 1);
-});
-
-test("写入：点清除 → configure 写 null 删服务商 rpm 并回读空", async () => {
-  rpmValue = 77;
-  calls.configure.length = 0;
-  render(regs[0].render({ provider: { provider: "opencode" } }));
-  await flush();
-  resetHooks();
-  const tree = render(regs[0].render({ provider: { provider: "opencode" } }));
-  const clearBtn = findAll(tree, (n) => n.type === "button" && textOf(n) === "清除")[0];
-  clearBtn.props.onClick();
-  await flush();
-  assert.equal(calls.configure.length, 1);
-  assert.deepEqual(calls.configure[0], { limits: { providers: { opencode: { rpm: null } } } });
-  resetHooks();
-  const treeDone = render(regs[0].render({ provider: { provider: "opencode" } }));
-  assert.equal(findAll(treeDone, (n) => n.type === "input")[0].props.value, "", "清除后回读应为空（回落上层=不限）");
-});
-
-test("探测：点探测 → probe 发起 → 结论直显", async () => {
-  // 回收组件起的轮询 timer，防测试进程悬挂。
+test("探测：点探测 → 按钮变倒计时；结论落地 → 按钮变回探测 + note 直显", async () => {
+  // 回收组件起的轮询 timer（poller 1s + 本地走格 ticker 0.5s），防测试进程悬挂。
   const timers: unknown[] = [];
   const g = globalThis as any;
   const realSetInterval = g.setInterval;
@@ -268,12 +241,10 @@ test("探测：点探测 → probe 发起 → 结论直显", async () => {
     return handle;
   };
   try {
-    probeStatusScript = {
-      state: "done",
-      result: { topped: true, estimate: 60, lowerBound: 60, applied: true, appliedRpm: 60, note: "测得约 60 RPM，已自动填入" },
-    };
+    probeStatusScript = { state: "running", sent: 3, succeeded: 3, rateLimited: 0, elapsedMs: 3000, durationMs: 120000 };
     calls.probe.length = 0;
     calls.probeStatus.length = 0;
+    const describeBefore = calls.describe.length;
     resetHooks();
     render(regs[0].render({ provider: { provider: "opencode" } }));
     await flush();
@@ -284,13 +255,66 @@ test("探测：点探测 → probe 发起 → 结论直显", async () => {
     assert.equal(calls.probe.length, 1);
     assert.deepEqual(calls.probe[0], { provider: "opencode" });
     assert.ok(calls.probeStatus.length >= 1);
+    // 倒计时 = ceil((120000-3000)/1000) = 117s（“探测”二字消失，只剩秒数）。
+    resetHooks();
+    const counting = render(regs[0].render({ provider: { provider: "opencode" } }));
+    assert.deepEqual(findAll(counting, (n) => n.type === "button").map(textOf), ["应用", "117s"]);
+    // 结论落地（触顶自动填入）：等一次轮询 → 按钮变回探测 + note 直显 + RPM 就地回读。
+    probeStatusScript = {
+      state: "done",
+      result: { topped: true, estimate: 60, lowerBound: 60, applied: true, appliedRpm: 60, note: "测得约 60 RPM，已自动填入" },
+    };
+    await new Promise((r) => setTimeout(r, 1200));
+    await flush();
     resetHooks();
     const done = render(regs[0].render({ provider: { provider: "opencode" } }));
+    assert.deepEqual(findAll(done, (n) => n.type === "button").map(textOf), ["应用", "探测"]);
     assert.ok(textOf(done).includes("测得约 60 RPM，已自动填入"), "结论 note 应直显");
-    assert.equal(findAll(done, (n) => n.type === "button" && textOf(n) === "重测").length, 1);
+    assert.ok(calls.describe.length > describeBefore, "自动填入后应就地回读 RPM");
   } finally {
     for (const handle of timers.splice(0)) g.clearInterval(handle);
     g.setInterval = realSetInterval;
-    probeStatusScript = { state: "running", sent: 3, succeeded: 3, rateLimited: 0 };
+    probeStatusScript = { state: "running", sent: 3, succeeded: 3, rateLimited: 0, elapsedMs: 3000, durationMs: 120000 };
+  }
+});
+
+test("探测：倒计时点按 = 取消（已取消落地即回按钮）", async () => {
+  const timers: unknown[] = [];
+  const g = globalThis as any;
+  const realSetInterval = g.setInterval;
+  g.setInterval = (fn: (...args: unknown[]) => void, ms: number) => {
+    const handle = realSetInterval(fn, ms);
+    timers.push(handle);
+    return handle;
+  };
+  try {
+    probeStatusScript = { state: "running", sent: 1, succeeded: 1, rateLimited: 0, elapsedMs: 1000, durationMs: 120000 };
+    calls.cancelProbe.length = 0;
+    resetHooks();
+    render(regs[0].render({ provider: { provider: "opencode" } }));
+    await flush();
+    resetHooks();
+    const tree = render(regs[0].render({ provider: { provider: "opencode" } }));
+    findAll(tree, (n) => n.type === "button" && textOf(n) === "探测")[0].props.onClick();
+    await flush();
+    resetHooks();
+    const counting = render(regs[0].render({ provider: { provider: "opencode" } }));
+    const countdown = findAll(counting, (n) => n.type === "button" && /^\d+s$/.test(textOf(n)))[0];
+    assert.ok(countdown, "运行中按钮应为倒计时秒数");
+    // 点倒计时 → 取消；结论（已取消）落地 → 按钮变回探测。
+    probeStatusScript = { state: "done", result: { topped: false, lowerBound: 1, applied: false, cancelled: true, note: "探测已取消" } };
+    countdown.props.onClick();
+    await new Promise((r) => setTimeout(r, 200));
+    await flush();
+    assert.equal(calls.cancelProbe.length, 1);
+    assert.deepEqual(calls.cancelProbe[0], { provider: "opencode" });
+    resetHooks();
+    const back = render(regs[0].render({ provider: { provider: "opencode" } }));
+    assert.deepEqual(findAll(back, (n) => n.type === "button").map(textOf), ["应用", "探测"]);
+    assert.ok(textOf(back).includes("探测已取消"));
+  } finally {
+    for (const handle of timers.splice(0)) g.clearInterval(handle);
+    g.setInterval = realSetInterval;
+    probeStatusScript = { state: "running", sent: 3, succeeded: 3, rateLimited: 0, elapsedMs: 3000, durationMs: 120000 };
   }
 });

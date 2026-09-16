@@ -117,7 +117,8 @@ export interface ProbeResult {
   note: string;
 }
 
-/** probeStatus 回执（三态：idle / running / done，done 带 result）。 */
+/** probeStatus 回执（三态：idle / running / done，done 带 result）。
+ *  running 带 durationMs（倒计时分母，UI 用 durationMs - elapsedMs 显示剩余秒）。 */
 export interface ProbeStatusResult {
   state: "idle" | "running" | "done";
   probeId?: string;
@@ -127,6 +128,7 @@ export interface ProbeStatusResult {
   succeeded?: number;
   rateLimited?: number;
   elapsedMs?: number;
+  durationMs?: number;
   result?: ProbeResult;
 }
 
@@ -402,6 +404,7 @@ export class GovernorService {
         succeeded: running.succeeded,
         rateLimited: running.rateLimited,
         elapsedMs: Date.now() - running.startedAt,
+        durationMs: running.spec.durationMs,
       };
     }
     const last = this.lastResults.get(provider);

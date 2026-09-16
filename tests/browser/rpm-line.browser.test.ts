@@ -1,8 +1,8 @@
-/** rpm-line.ui.test.ts —— RPM 单行 + 探测行真机验证（STANDARDS §5 机器化）：一次性实例走
- *  「设置 → 模型」，断言每卡 RPM 行（标签就 RPM 三个字 + 数字框 + 应用 + 清除）与探测行
- *  （探测按钮 + 说明）挂载、零崩脸、无旧垃圾；第二场景真写一次 RPM 并断言回读（覆盖 busy
- *  回解回归）；第三场景点探测走真链路（无 key 的裸实例必 fast-fail，或跑起来就取消），
- *  断言行内出现结论/错误/取消文案（wire-through 证明，不过长等待）。
+/** rpm-line.ui.test.ts —— 治理单行真机验证（STANDARDS §5 机器化）：一次性实例走
+ *  「设置 → 模型」，断言每卡单行（RPM + 数字框 + 应用 + 探测，无清除）挂载、零崩脸、
+ *  无旧垃圾；第二场景真写一次 RPM 并断言回读（覆盖 busy 回解回归）；第三场景点探测
+ *  走真链路（无 key 的裸实例必 fast-fail：按钮变回探测 + 行下跟失败文案），断言
+ *  wire-through（结论/错误/取消文案出现即算通，不过长等待）。
  *  跑法：pnpm check:browser（自起实例 + 系统 Chrome，不碰任何正在服务的 host）。 */
 import { uiScenarioSuite, type UiContext } from "dsh-check";
 import { fileURLToPath } from "node:url";
@@ -32,7 +32,7 @@ uiScenarioSuite({
   pluginRoot,
   scenarios: [
     {
-      name: "设置 → 模型：RPM 单行挂载，零崩脸，无旧垃圾",
+      name: "设置 → 模型：治理单行挂载，零崩脸，无旧垃圾",
       async run({ page }) {
         const dialog = await openModels(page);
         try {
@@ -44,11 +44,18 @@ uiScenarioSuite({
           throw new Error(`等 .gvr-rpm 超时；弹层文本头：${text}（截图 /tmp/gov-rpm-fail.png）`);
         }
         const crash = await dialog.locator("[data-slot-error]").count();
-        if (crash !== 0) throw new Error(`崩脸 ${crash} 处：RPM 行炸了`);
+        if (crash !== 0) throw new Error(`崩脸 ${crash} 处：治理单行炸了`);
         const old = await dialog.locator(".gvr-card").count();
         if (old !== 0) throw new Error(`旧垃圾 .gvr-card 残留 ${old} 处`);
-        const label = await dialog.locator(".gvr-rpm").first().innerText();
+        const row = dialog.locator(".gvr-rpm").first();
+        const label = await row.innerText();
         if (!label.includes("RPM")) throw new Error(`首行无 RPM 字样，实得：${label.slice(0, 60)}`);
+        // 单行两按钮：应用在前、探测在后，无清除、无探测行。
+        const btns = await row.locator("button").allInnerTexts();
+        if (btns.length !== 2 || btns[0] !== "应用" || btns[1] !== "探测") {
+          throw new Error(`单行按钮形态不对，实得：${JSON.stringify(btns)}`);
+        }
+        if ((await dialog.locator(".gvr-probe").count()) !== 0) throw new Error("旧探测行 .gvr-probe 残留");
         await page.screenshot({ path: "/tmp/gov-rpm.png" });
       },
     },
@@ -64,40 +71,34 @@ uiScenarioSuite({
         await row.locator("button", { hasText: "应用" }).waitFor({ timeout: 15_000 });
         const value = await row.locator("input").inputValue();
         if (value !== "77") throw new Error(`回读失败：期望 77，实得 ${value}`);
-        // 清除：删掉服务商级 rpm，回读空（回落上层=不限）。
-        await row.locator("button", { hasText: "清除" }).click();
-        let cleared = "";
-        for (let i = 0; i < 30 && cleared !== ""; i++) {
-          if (i > 0) await page.waitForTimeout(500);
-          cleared = await row.locator("input").inputValue();
-        }
-        if (cleared !== "") throw new Error(`清除后回读失败：期望空，实得 ${cleared}`);
       },
     },
     {
-      name: "探测行挂载：有点探测按钮；点探测走真链路（失败/取消皆算通）",
+      name: "探测：点探测走真链路（裸实例 fast-fail：按钮变回探测 + 行下跟失败文案）",
       async run({ page }) {
         const dialog = await openModels(page);
-        const row = dialog.locator(".gvr-probe").first();
+        const row = dialog.locator(".gvr-rpm").first();
         await row.waitFor({ state: "visible", timeout: 25_000 });
-        const hint = await row.innerText();
-        if (!hint.includes("探测")) throw new Error(`探测行无探测字样，实得：${hint.slice(0, 60)}`);
         await row.locator("button", { hasText: "探测" }).click();
-        // 裸实例无 key：要么 fast-fail 出错误文案，要么跑起来（出现取消按钮）→ 主动取消。
-        const cancel = row.locator("button", { hasText: "取消" });
+        // 裸实例无 key：探测发起即失败 → 按钮变回“探测”，行下跟失败文案。
+        // 若 8 秒内按钮变成倒计时（说明真跑起来了）→ 点它取消，同样回按钮 + 取消文案。
+        const probeBtn = row.locator("button", { hasText: "探测" });
         try {
-          await cancel.waitFor({ state: "visible", timeout: 8_000 });
-          await cancel.click();
+          await probeBtn.waitFor({ state: "visible", timeout: 30_000 });
         } catch {
-          // 8 秒内没进入 running：应已直接落地结论/错误，不断言细节，下一步统一验行文案。
+          // 30 秒还没回按钮：看是不是倒计时卡住，卡住就点它取消再验。
+          const countdown = row.locator("button").nth(1);
+          const countdownText = await countdown.innerText().catch(() => "");
+          if (/^\d+s$/.test(countdownText)) await countdown.click();
+          await probeBtn.waitFor({ state: "visible", timeout: 30_000 });
         }
         let text = "";
-        for (let i = 0; i < 30 && !(text.length > 20 && /探测|取消|写入|失败|触顶|RPM|错误|已有探测/.test(text)); i++) {
+        for (let i = 0; i < 15 && !(text.length > 10 && /探测|取消|写入|失败|触顶|RPM|错误|已有探测/.test(text)); i++) {
           await page.waitForTimeout(1000);
           text = await row.innerText().catch(() => "");
         }
-        if (!(text.length > 20 && /探测|取消|写入|失败|触顶|RPM|错误|已有探测/.test(text))) {
-          throw new Error(`探测行无结论文案，实得：${text.slice(0, 120)}`);
+        if (!(text.length > 10 && /探测|取消|写入|失败|触顶|RPM|错误|已有探测/.test(text))) {
+          throw new Error(`探测后无结论/失败文案，实得：${text.slice(0, 120)}`);
         }
         await page.screenshot({ path: "/tmp/gov-probe.png" });
       },

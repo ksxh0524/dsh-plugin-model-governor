@@ -562,6 +562,7 @@ test("probe：单飞行 busy + cancelProbe 取消", async () => {
   const running = await svc.probeStatus({ provider: "p" });
   assert.equal(running.state, "running");
   assert.ok((running.sent ?? 0) >= 0);
+  assert.equal(running.durationMs, 120000, "running 带 durationMs（UI 倒计时分母）");
   assert.deepEqual(await svc.cancelProbe({ provider: "p" }), { ok: true, cancelled: true, errors: [] });
   const result = await waitProbeDone(svc, "p");
   assert.equal(result.cancelled, true);
