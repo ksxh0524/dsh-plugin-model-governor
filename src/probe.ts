@@ -35,6 +35,9 @@ export interface ProbeSpec {
   maxRequests: number;
   /** 全程时长硬上限毫秒（5000–180000，缺省 120000）。 */
   durationMs: number;
+  /** 单次探测请求的 maxTokens（1–200 的整数，缺省 16：远端网关常对
+   *  max_completion_tokens 设下限（如 >2），1 会吃 400；16 仍极便宜）。 */
+  maxTokens: number;
 }
 
 export const PROBE_DEFAULTS = {
@@ -45,6 +48,7 @@ export const PROBE_DEFAULTS = {
   staggerMs: 50,
   maxRequests: 150,
   durationMs: 120_000,
+  maxTokens: 16,
 } as const;
 
 /** 60 秒滑动窗口（RPM 定义窗，limiter.ts 同值）。 */
@@ -83,9 +87,12 @@ export function normalizeProbeSpec(value: unknown): { spec: ProbeSpec; errors: [
       key !== "confirmCount" &&
       key !== "staggerMs" &&
       key !== "maxRequests" &&
-      key !== "durationMs"
+      key !== "durationMs" &&
+      key !== "maxTokens"
     ) {
-      errors.push(`未知探测参数：“${key}”，仅支持 provider、model、phaseA、bursts、confirmPauseMs、confirmCount、staggerMs、maxRequests、durationMs`);
+      errors.push(
+        `未知探测参数：“${key}”，仅支持 provider、model、phaseA、bursts、confirmPauseMs、confirmCount、staggerMs、maxRequests、durationMs、maxTokens`,
+      );
     }
   }
   const provider: unknown = value["provider"];
@@ -130,6 +137,10 @@ export function normalizeProbeSpec(value: unknown): { spec: ProbeSpec; errors: [
   if (durationMs !== undefined && intIn(durationMs, 5000, 180000) === undefined) {
     errors.push(`probe.durationMs 必须是 5000–180000 的整数毫秒（当前值：${fmt(durationMs)}）`);
   }
+  const maxTokens: unknown = value["maxTokens"];
+  if (maxTokens !== undefined && intIn(maxTokens, 1, 200) === undefined) {
+    errors.push(`probe.maxTokens 必须是 1–200 的整数（当前值：${fmt(maxTokens)}）`);
+  }
   if (errors.length > 0) return { errors };
   const spec: ProbeSpec = {
     provider: (provider as string).trim(),
@@ -140,6 +151,7 @@ export function normalizeProbeSpec(value: unknown): { spec: ProbeSpec; errors: [
     staggerMs: (staggerMs as number | undefined) ?? PROBE_DEFAULTS.staggerMs,
     maxRequests: (maxRequests as number | undefined) ?? PROBE_DEFAULTS.maxRequests,
     durationMs: (durationMs as number | undefined) ?? PROBE_DEFAULTS.durationMs,
+    maxTokens: (maxTokens as number | undefined) ?? PROBE_DEFAULTS.maxTokens,
   };
   if (model !== undefined) spec.model = (model as string).trim();
   return { spec, errors: [] };

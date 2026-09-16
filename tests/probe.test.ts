@@ -18,6 +18,11 @@ test("normalizeProbeSpec：缺省回填 + provider 必填", () => {
   assert.equal(good.spec?.phaseA, PROBE_DEFAULTS.phaseA);
   assert.deepEqual(good.spec?.bursts, [...PROBE_DEFAULTS.bursts]);
   assert.equal(good.spec?.model, undefined);
+  // maxTokens 缺省 16（远端网关常拒 max_completion_tokens:1，见 400 回归）。
+  assert.equal(good.spec?.maxTokens, 16);
+  const custom = normalizeProbeSpec({ provider: "p", maxTokens: 5 });
+  assert.equal(custom.errors.length, 0);
+  assert.equal(custom.spec?.maxTokens, 5);
   const missing = normalizeProbeSpec({});
   assert.ok(missing.errors.length > 0);
   for (const message of missing.errors) assert.match(message, HAS_CHINESE);
@@ -26,10 +31,11 @@ test("normalizeProbeSpec：缺省回填 + provider 必填", () => {
 });
 
 test("normalizeProbeSpec：越界与未知键逐条中文拒收", () => {
-  const bad = normalizeProbeSpec({ provider: "p", phaseA: 0, bursts: [8, 999], bogus: 1, durationMs: 1000 });
-  assert.ok(bad.errors.length >= 4, `期望≥4 条，实得：${JSON.stringify(bad.errors)}`);
+  const bad = normalizeProbeSpec({ provider: "p", phaseA: 0, bursts: [8, 999], bogus: 1, durationMs: 1000, maxTokens: 0 });
+  assert.ok(bad.errors.length >= 5, `期望≥5 条，实得：${JSON.stringify(bad.errors)}`);
   for (const message of bad.errors) assert.match(message, HAS_CHINESE);
   assert.match(bad.errors.join("；"), /未知探测参数/);
+  assert.match(bad.errors.join("；"), /maxTokens/);
   // 空 bursts 合法（跳过 B 阶段）。
   assert.equal(normalizeProbeSpec({ provider: "p", bursts: [] }).errors.length, 0);
 });

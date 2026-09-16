@@ -435,12 +435,15 @@ type ProbeBehavior = "ok" | "limited" | "quota" | "auth";
 /** 脚本化桩 llm（按调用序号落地终端块；小延迟让出事件循环，感知 abort）。 */
 function makeProbeLlm(behavior: (callIndex: number) => ProbeBehavior, delayMs = 5): any {
   let calls = 0;
+  const seen: any[] = [];
   return {
     listProviders: async () => [{ id: "p" }],
     listModels: async () => [{ id: "m" }],
+    seen,
     stream: (options: any) =>
       (async function* () {
         const n = calls++;
+        seen.push(options);
         await new Promise((r) => setTimeout(r, delayMs));
         if (options.signal?.aborted) {
           yield { type: "finish", reason: { kind: "aborted", failure: { code: "ABORTED", message: "cancelled" } } };
@@ -472,10 +475,11 @@ async function waitProbeDone(svc: GovernorService, provider: string, timeoutMs =
 test("probe：小 RPM 单发定论（3 成功后 429 → 估计 3 并自动填入）", async () => {
   const { ctx } = makeCtx({ llm: undefined });
   const svc = applyCordis(ctx, {});
+  const stub = makeProbeLlm((n) => (n < 3 ? "ok" : "limited"));
   ctx.get = (
     (_inner: unknown) => (_name: string) =>
       _inner
-  )(makeProbeLlm((n) => (n < 3 ? "ok" : "limited")));
+  )(stub);
   const started = await svc.probe({ provider: "p", phaseA: 10, bursts: [], maxRequests: 20 });
   assert.equal(started.ok, true);
   const result = await waitProbeDone(svc, "p");
@@ -485,6 +489,23 @@ test("probe：小 RPM 单发定论（3 成功后 429 → 估计 3 并自动填�
   assert.equal(result.appliedRpm, 3);
   assert.match(result.note, /已自动填入/);
   assert.deepEqual((await svc.describe({ provider: "p", model: "m" })).models[0].limits, { rpm: 3 }, "触顶必须自动填入 provider 级 rpm");
+  // 400 回归：探测请求 maxTokens 缺省 16（不再是 1），且透传到远端。
+  assert.ok(stub.seen.length > 0);
+  for (const options of stub.seen) assert.equal(options.maxTokens, 16);
+});
+
+test("probe：maxTokens 可调（网关下限各异时透传自定义值）", async () => {
+  const { ctx } = makeCtx({ llm: undefined });
+  const svc = applyCordis(ctx, {});
+  const stub = makeProbeLlm(() => "ok");
+  ctx.get = (
+    (_inner: unknown) => (_name: string) =>
+      _inner
+  )(stub);
+  assert.equal((await svc.probe({ provider: "p", phaseA: 2, bursts: [], maxRequests: 2, maxTokens: 32 })).ok, true);
+  await waitProbeDone(svc, "p");
+  assert.equal(stub.seen.length, 2);
+  for (const options of stub.seen) assert.equal(options.maxTokens, 32);
 });
 
 test("probe：端到端走真监听器（本地 rpm=1 不污染探测）", async () => {

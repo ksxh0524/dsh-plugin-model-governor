@@ -5,7 +5,7 @@ DSH 模型治理面：每张服务商卡片一行 RPM（只排队、不拒单）
 ## 功能
 
 - **RPM 排队（永不拒单）**：`limits.defaults` → 服务商默认 → 模型覆盖，按维度（RPM / TPM / 并发）各自合并。令牌不够时本地排队等待（FIFO），不打到远端吃 429。等待不计入 `maxRetries`；abort 即撤出排队。
-- **RPM 探测（触顶自动填入）**：每卡 `探测` 按钮发极小请求（`maxTokens: 1`）分两阶段测——先单并发连打（小水管秒级定论，碰不到并发墙），再并行加倍 burst（大水管用累计成功数逼近）。只有亲眼见到 429（N 个放行、第 N+1 个被拒）才自动写入服务商级 RPM——这是远端刚演示的事实，不是推断。未触顶 / 失败 / 取消一律不写、保持不限流。单服务商单飞行，随时可取消。
+- **RPM 探测（触顶自动填入）**：每卡 `探测` 按钮发极小请求（`maxTokens` 缺省 16，可调 1–200——部分网关对 `max_completion_tokens: 1` 直接 400）分两阶段测——先单并发连打（小水管秒级定论，碰不到并发墙），再并行加倍 burst（大水管用累计成功数逼近）。只有亲眼见到 429（N 个放行、第 N+1 个被拒）才自动写入服务商级 RPM——这是远端刚演示的事实，不是推断。未触顶 / 失败 / 取消一律不写、保持不限流。单服务商单飞行，随时可取消。
 - **OpenCode 会话头**：原生移植 `dsh-opencode-session`（nobu121，MIT，见致谢）：给 OpenCode 系请求补 `x-opencode-session` 头，治 400 MissingSessionID 并保持 prompt-cache 亲和。
 - **成败上报口（预留）**：每次请求 exactly-once 向 `noteOutcome` 上报成败——将来熔断器（与按错误码处置 UI）挂在这里。目前只收信号，不改流。
 
@@ -43,7 +43,7 @@ dsh plugin --profile <your-profile> add ./path/to/dsh-plugin-model-governor
 
 ## 探测
 
-`probe({ provider, model?, phaseA?, bursts?, confirmPauseMs?, confirmCount?, staggerMs?, maxRequests?, durationMs? })` 后台跑、立即返回；`probeStatus({ provider })` 轮询进度，`cancelProbe({ provider })` 取消。缺省：`phaseA: 15`、`bursts: [8,16,32]`、`maxRequests: 150`、`durationMs: 120000`。探测流量 bypass 本地限流（测的是远端不是自己），成败同样进 `noteOutcome`。配额见底（`QUOTA`）即停探，且绝不当 RPM 写入。
+`probe({ provider, model?, phaseA?, bursts?, confirmPauseMs?, confirmCount?, staggerMs?, maxRequests?, durationMs?, maxTokens? })` 后台跑、立即返回；`probeStatus({ provider })` 轮询进度，`cancelProbe({ provider })` 取消。缺省：`phaseA: 15`、`bursts: [8,16,32]`、`maxRequests: 150`、`durationMs: 120000`、`maxTokens: 16`。探测流量 bypass 本地限流（测的是远端不是自己），成败同样进 `noteOutcome`。配额见底（`QUOTA`）即停探，且绝不当 RPM 写入。
 
 ## 界面
 

@@ -429,7 +429,8 @@ export class GovernorService {
     return { ok: true, cancelled: true, errors: [] };
   }
 
-  /** 一次探测请求的完整构造（极小：1 条文本消息 + maxTokens:1；sessionId 挂探测 id 便于链路追踪）。 */
+  /** 一次探测请求的完整构造（极小：1 条文本消息 + maxTokens 取 spec，缺省 16；
+   *  远端网关常对 max_completion_tokens 设下限（如 >2），1 会吃 400）。 */
   private probeOptions(run: ProbeRun): any {
     return {
       provider: run.provider,
@@ -442,7 +443,7 @@ export class GovernorService {
           source: { kind: "user" },
         },
       ],
-      maxTokens: 1,
+      maxTokens: run.spec.maxTokens,
       signal: run.controller.signal,
       sessionId: `governor-probe-${run.id}`,
     };
