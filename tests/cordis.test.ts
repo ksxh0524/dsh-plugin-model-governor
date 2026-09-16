@@ -362,6 +362,67 @@ test("监听：provider 桶用线路口径（模型级 rpm 不连带卡死其他
   }
 });
 
+test("监听：第二次 acquire 失败归还第一桶（abort 落在两 acquire 之间不泄漏并发槽）", async () => {
+  const { ctx, listeners } = makeCtx({ llm: makeLlm() });
+  const svc = applyCordis(ctx, { limits: { providers: { p: { maxConcurrent: 1 } }, models: { "p/m": { maxConcurrent: 1 } } } });
+  const onStream = streamListenerOf(listeners);
+  // 直接占住模型桶：下一个 p/m 请求必在第二次 acquire 处排队（第一桶已授予）。
+  await svc.buckets.acquire("p/m", { maxConcurrent: 1 });
+  const controller = new AbortController();
+  const queued = drain(
+    (onStream as any)({ provider: "p", model: "m", signal: controller.signal }, () =>
+      (async function* () {
+        yield "never";
+      })(),
+    ),
+  );
+  await new Promise((r) => setTimeout(r, 50));
+  controller.abort(new Error("between-acquires"));
+  await assert.rejects(queued, "排队的请求应随 abort 撤出");
+  svc.buckets.release("p/m");
+  // 若第一桶泄漏（inflight 卡 1/1），下一次请求将永久排队。
+  const chunks = await withTimeout(
+    drain(
+      (onStream as any)({ provider: "p", model: "m" }, () =>
+        (async function* () {
+          yield "x";
+        })(),
+      ),
+    ),
+    2000,
+    "第一桶泄漏：provider 并发槽未归还，新请求被卡死",
+  );
+  assert.deepEqual(chunks, ["x"]);
+});
+
+test("监听：消费方提前 return 也 exactly-once 上报（取消不丢信号、正常读完不 double）", async () => {
+  const { ctx, listeners } = makeCtx({ llm: makeLlm() });
+  const svc = applyCordis(ctx, {}) as GovernorService;
+  const seen: Array<{ key: string; err: unknown }> = [];
+  const orig = svc.noteOutcome.bind(svc);
+  svc.noteOutcome = (key: string, err: unknown): void => {
+    seen.push({ key, err });
+    orig(key, err);
+  };
+  const onStream = streamListenerOf(listeners);
+  const next = () =>
+    (async function* () {
+      yield "a";
+      yield "b";
+    })();
+  // 只读一块就撤：finally 必须补报一次。
+  const gen = (onStream as any)({ provider: "p", model: "m" }, next) as AsyncGenerator<any, void, unknown>;
+  assert.equal((await gen.next()).value, "a");
+  await gen.return(undefined);
+  assert.equal(seen.length, 1, "提前 return 必须在 finally 补报一次");
+  assert.equal(seen[0].key, "p");
+  // 正常读完：恰报一次成功。
+  seen.length = 0;
+  assert.deepEqual(await drain((onStream as any)({ provider: "p", model: "m" }, next)), ["a", "b"]);
+  assert.equal(seen.length, 1, "正常读完恰上报一次");
+  assert.equal(seen[0].err, undefined);
+});
+
 test("监听：探测旁路跳过 acquire（本地 rpm=1 也不排队），header 照常", async () => {
   const seen: Array<{ headers: Headers }> = [];
   globalThis.fetch = (async (_input: any, init?: any) => {
@@ -489,6 +550,7 @@ test("probe：小 RPM 单发定论（3 成功后 429 → 估计 3 并自动填�
   assert.equal(result.appliedRpm, 3);
   assert.match(result.note, /已自动填入/);
   assert.deepEqual((await svc.describe({ provider: "p", model: "m" })).models[0].limits, { rpm: 3 }, "触顶必须自动填入 provider 级 rpm");
+  assert.equal((await svc.probeStatus({ provider: "p" })).model, "m", "done 态回执保留 model（与 running 对称）");
   // 400 回归：探测请求 maxTokens 缺省 16（不再是 1），且透传到远端。
   assert.ok(stub.seen.length > 0);
   for (const options of stub.seen) assert.equal(options.maxTokens, 16);
@@ -568,6 +630,44 @@ test("probe：单飞行 busy + cancelProbe 取消", async () => {
   assert.equal(result.cancelled, true);
   assert.equal(result.applied, false);
   assert.deepEqual(await svc.cancelProbe({ provider: "p" }), { ok: true, cancelled: false, errors: [] }, "idle 再取消照常 ok");
+});
+
+test("probe：bare-done 成功同样计数（无 finish 块直接结束不丢数）", async () => {
+  const { ctx } = makeCtx({ llm: undefined });
+  const svc = applyCordis(ctx, {});
+  let n = 0;
+  ctx.get = () => ({
+    listProviders: async () => [{ id: "p" }],
+    listModels: async () => [{ id: "m" }],
+    stream: () =>
+      (async function* () {
+        n += 1;
+        yield "chunk";
+      })(),
+  });
+  assert.equal((await svc.probe({ provider: "p", phaseA: 3, bursts: [], maxRequests: 3 })).ok, true);
+  const result = await waitProbeDone(svc, "p");
+  assert.equal(n, 3);
+  assert.equal(result.topped, false);
+  assert.equal(result.sent, 3);
+  assert.equal(result.succeeded, 3, "bare-done 成功必须落数（曾只在 finish 块路径计数）");
+});
+
+test("probe：抛错路径的限流同样计数（rateLimited 落数）", async () => {
+  const { ctx } = makeCtx({ llm: undefined });
+  const svc = applyCordis(ctx, {});
+  ctx.get = () => ({
+    listProviders: async () => [{ id: "p" }],
+    listModels: async () => [{ id: "m" }],
+    stream: () => {
+      throw Object.assign(new Error("429 slow down"), { code: "RATE_LIMIT" });
+    },
+  });
+  assert.equal((await svc.probe({ provider: "p", phaseA: 5, bursts: [] })).ok, true);
+  const result = await waitProbeDone(svc, "p");
+  assert.equal(result.topped, true);
+  assert.ok(result.rateLimited >= 1, "抛错路径的 429 必须计入 rateLimited（曾只在 finish 块路径计数）");
+  assert.equal(result.applied, false, "零成功触顶不填入");
 });
 
 test("probe：非法参数中文拒收；status/cancel 无 provider 行为", async () => {

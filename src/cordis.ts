@@ -27,15 +27,18 @@
  *   llm 读面用 `ctx.llm ?? ctx.get?.("llm")` 双保险）。
  * - 监听器用 async-generator 形（session-checkpoint-policy `afterCheckpoint` 同款：预检工作在首 pull
  *   时执行）：`acquire(provider 桶)` → `acquire(provider/model 桶)`（min 语义，TPM 预占取
- *   `options.maxTokens ?? 0` 估计值）→ `next()` 恰调一次 → 头条件满足则 `withStore` 包裹后委托。
+ *   `options.maxTokens ?? 0` 估计值；第二次 acquire 抛错先还第一桶，并发槽永不泄漏）
+ *   → `next()` 恰调一次 → 头条件满足则 `withStore` 包裹后委托。
  *   并发槽在 `finally` 里双桶 `release`（S2 limiter.ts 合同：调用方负责归还，超额归还忽略）；
- *   `next()` 同步抛也先归还再透传。`options.sessionId` 缺失或非目标 provider 只跳过 header，限流照做。
+ *   `next()` 同步抛也先归还再透传；消费方提前 return（break/取消）跳过上报时在 `finally` 补报，
+ *   `noteOutcome` 依然 exactly-once。`options.sessionId` 缺失或非目标 provider 只跳过 header，限流照做。
  * - 会话头机制移植自 `dsh-opencode-session`（作者 nobu121，MIT）：
  *   store 形 `{ value }` + `patchFetch` 由本文件在装配时安装（有 `ctx.effect` 则走 fiber 作用域，
  *   卸载自动还原；无则常驻补丁并注释说明）。provider 过滤与 `next()` 调度归本文件，取值/包装/
  *   补丁归 session-header.ts。
  * - `describe` 只读装配：`buildDescribeInput` 归一 → 宿主 `listModels`/`listProviders` 取 id
- *   → 附 `effectiveLimits`（模型 → 服务商 → 全局默认逐维合并）。纯限流读出，不读档位、不抛错。
+ *   → 附 `effectiveLimits`（模型 → 服务商 → 全局默认逐维合并）。纯限流读出，不读档位；
+ *   宿主 llm 面挂了透传错误（fail-loud，不吞成空表）。
  *   provider 缺席但 model 在场时按 model 精确过滤（缺席≠不过滤）。
  * - `configure` 只认 `{limits?, sessionHeader?}`：校验后并入**运行时 live 配置**（bundle 行
  *   config 是静态起点，重启回落）；未知顶层键直接报错，禁静默吞键。某维写 `null` 即删掉
@@ -204,8 +207,8 @@ export class GovernorService {
   readonly uuidTable = new Map<string, string>();
   /** 进行中的探测（单服务商单飞行，key=provider）。 */
   private readonly probes = new Map<string, ProbeRun>();
-  /** 各服务商最近一次探测结论（key=provider；新探测启动时清掉）。 */
-  private readonly lastResults = new Map<string, { result: ProbeResult; at: number }>();
+  /** 各服务商最近一次探测结论（key=provider；新探测启动时清掉；model 随结论保留，done 态回执对称）。 */
+  private readonly lastResults = new Map<string, { result: ProbeResult; model: string; at: number }>();
 
   constructor(ctx: any, config?: unknown) {
     this.ctx = ctx;
@@ -366,7 +369,7 @@ export class GovernorService {
       .run(true, () => this.executeProbe(run))
       .then(
         (result) => {
-          this.lastResults.set(run.provider, { result, at: Date.now() });
+          this.lastResults.set(run.provider, { result, model: run.model, at: Date.now() });
           if (this.probes.get(run.provider) === run) this.probes.delete(run.provider);
         },
         (err: unknown) => {
@@ -381,7 +384,7 @@ export class GovernorService {
             failure: { code: "UNKNOWN", message: errorOf(err) },
             note: `探测内部失败：${errorOf(err)}，未写入`,
           };
-          this.lastResults.set(run.provider, { result, at: Date.now() });
+          this.lastResults.set(run.provider, { result, model: run.model, at: Date.now() });
           if (this.probes.get(run.provider) === run) this.probes.delete(run.provider);
         },
       );
@@ -412,7 +415,7 @@ export class GovernorService {
     return {
       state: "done",
       provider,
-      model: undefined,
+      model: last.model,
       sent: last.result.sent,
       succeeded: last.result.succeeded,
       rateLimited: last.result.rateLimited,
@@ -448,7 +451,9 @@ export class GovernorService {
       ],
       maxTokens: run.spec.maxTokens,
       signal: run.controller.signal,
-      sessionId: `governor-probe-${run.id}`,
+      // 探测 sessionId 按 provider 稳定（不用 run.id）：uuid 模式按 sessionId 落表，
+      // 每次新 id 即一条永不删的表项，长期运行会被探测撑大（审查修复）。
+      sessionId: `governor-probe-${run.provider}`,
     };
   }
 
@@ -456,35 +461,37 @@ export class GovernorService {
   private async singleProbeCall(run: ProbeRun): Promise<ProbeCallOutcome> {
     const llm = this.llmFace();
     run.sent += 1;
-    let stream: unknown;
+    let judged: ProbeCallOutcome;
     try {
-      stream = llm.stream(this.probeOptions(run));
+      judged = await this.drainProbeCall(llm.stream(this.probeOptions(run)));
     } catch (err) {
-      return classifyThrown(err, run.controller.signal.aborted);
+      judged = classifyThrown(err, run.controller.signal.aborted);
     }
-    try {
-      const iterable = stream as AsyncIterable<unknown> | AsyncIterator<unknown>;
-      const iterator: AsyncIterator<unknown> =
-        typeof (iterable as AsyncIterable<unknown>)[Symbol.asyncIterator] === "function"
-          ? (iterable as AsyncIterable<unknown>)[Symbol.asyncIterator]()
-          : (iterable as AsyncIterator<unknown>);
-      for (;;) {
-        const next = await iterator.next();
-        if (next.done === true) return { outcome: "success" };
-        const chunk = next.value as { type?: unknown; reason?: unknown } | null | undefined;
-        if (typeof chunk === "object" && chunk !== null && chunk.type === "finish") {
-          const judged = classifyFinishReason(chunk.reason);
-          if (judged.outcome === "success") {
-            run.succeeded += 1;
-            run.successTimes.push(Date.now());
-          } else if (judged.outcome === "rateLimited") {
-            run.rateLimited += 1;
-          }
-          return judged;
-        }
+    // 计数与判定收口一处：bare-done 成功与抛错路径的限流同样落数，
+    // 否则 probeStatus 快照与结论自相矛盾（审查修复）。
+    if (judged.outcome === "success") {
+      run.succeeded += 1;
+      run.successTimes.push(Date.now());
+    } else if (judged.outcome === "rateLimited") {
+      run.rateLimited += 1;
+    }
+    return judged;
+  }
+
+  /** 排干一次探测流并判定（只判定不计数，计数由 singleProbeCall 按 outcome 统一落）。 */
+  private async drainProbeCall(stream: unknown): Promise<ProbeCallOutcome> {
+    const iterable = stream as AsyncIterable<unknown> | AsyncIterator<unknown>;
+    const iterator: AsyncIterator<unknown> =
+      typeof (iterable as AsyncIterable<unknown>)[Symbol.asyncIterator] === "function"
+        ? (iterable as AsyncIterable<unknown>)[Symbol.asyncIterator]()
+        : (iterable as AsyncIterator<unknown>);
+    for (;;) {
+      const next = await iterator.next();
+      if (next.done === true) return { outcome: "success" };
+      const chunk = next.value as { type?: unknown; reason?: unknown } | null | undefined;
+      if (typeof chunk === "object" && chunk !== null && chunk.type === "finish") {
+        return classifyFinishReason(chunk.reason);
       }
-    } catch (err) {
-      return classifyThrown(err, run.controller.signal.aborted);
     }
   }
 
@@ -754,7 +761,15 @@ function installLlmStreamListener(ctx: any, service: GovernorService): void {
       const modelKey = `${provider}/${model}`;
       if (!bypassed) {
         await service.buckets.acquire(providerKey, providerDims, signal, reserve);
-        await service.buckets.acquire(modelKey, pairDims, signal, reserve);
+        try {
+          await service.buckets.acquire(modelKey, pairDims, signal, reserve);
+        } catch (err) {
+          // 第二次 acquire 失败（abort 落在两次取令牌之间）：第一次已占的并发槽必须归还，
+          // 否则 maxConcurrent 的 inflight 永久 +1，反复命中把该 key 彻底卡死（审查修复）。
+          // RPM/TPM 滑窗占位不在此撤销（limiter 无 revoke 语义），60 秒自然滑出、可接受。
+          service.buckets.release(providerKey);
+          throw err;
+        }
       }
       let downstream: unknown;
       try {
@@ -767,23 +782,33 @@ function installLlmStreamListener(ctx: any, service: GovernorService): void {
         service.noteOutcome(providerKey, err);
         throw err;
       }
+      let settled = false; // noteOutcome 是否已上报（finally 补报消费方提前 return 的路径）
       try {
         const value = service.headerValueForRequest(provider, options.sessionId);
         if (value === undefined || !isAsyncIterable(downstream)) {
           // 无头可加或下游非异步流：原样委托（同步可迭代 yield* 同样透传）。
           if (downstream !== null && downstream !== undefined) yield* downstream as AsyncIterable<any>;
+          settled = true;
           service.noteOutcome(providerKey, undefined);
           return;
         }
         yield* withStore(downstream, { value }, service.als);
+        settled = true;
         service.noteOutcome(providerKey, undefined);
       } catch (err) {
+        settled = true;
         service.noteOutcome(providerKey, err);
         throw err;
       } finally {
         if (!bypassed) {
           service.buckets.release(providerKey);
           service.buckets.release(modelKey);
+        }
+        if (!settled) {
+          // 消费方提前 return（break/取消）会跳过 yield* 之后的上报直进 finally：
+          // 在此补报一次，exactly-once 依然成立（审查修复）。
+          settled = true;
+          service.noteOutcome(providerKey, new Error("model-governor：消费方提前结束流（取消），下游未读完"));
         }
       }
     },
