@@ -42,13 +42,16 @@
  *   filter.provider 在场时另附 `providerLimits`（服务商桶执法口径：provider→defaults，不掺模型级覆盖）——
  *   卡片写的就是 providers[route].rpm，读数必须同源于此；取 models[0].limits 在首模型带覆盖时显示与写入不同源。
  *   provider 缺席但 model 在场时按 model 精确过滤（缺席≠不过滤）。
- * - `configure` 只认 `{limits?, sessionHeader?}`：校验后并入**运行时 live 配置**（bundle 行
- *   config 是静态起点，重启回落）；未知顶层键直接报错，禁静默吞键。某维写 `null` 即删掉
- *   已设值、回落上层（校验放行，合并后 `deleteNullLeaves` 落定）。校验→合并→删 null→live
- *   更新按序进行。返回 `{ok, applied, errors}`，域内失败一律返回值不抛（自动 fallback 切模型不做，ADR-001）。
+ * - `configure` 只认 `{limits?, sessionHeader?}`：校验后**持久化进宿主 settings 文档**
+ *  （`model-governor` 段，落 settings.yaml，热推送即时生效，重启仍在——research 同款；
+ *   settings 面缺席时才退进程内 overlay，重启回落）；未知顶层键直接报错，禁静默吞键。
+ *   某维写 `null` 即删掉已设值、回落上层（有 settings 走 mutate/unset，无 settings 走
+ *   `deleteNullLeaves` 落定）。校验→持久化→live 更新按序进行。返回 `{ok, applied, errors}`，
+ *   域内失败一律返回值不抛（自动 fallback 切模型不做，ADR-001）。
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 import { appendFile } from "node:fs/promises";
+import z from "@deepseek-ai/schemastery";
 import {
   deleteNullLeaves,
   effectiveLimits,
@@ -71,6 +74,49 @@ const REMOTE_METHODS_KEY = "@deepseek-ai/dsh-typert-protocol/remote-methods";
 
 /** configure 补丁可识别的顶层键（之外一律报错，禁静默吞键）。 */
 const CONFIGURE_KNOWN_KEYS = ["limits", "sessionHeader"];
+
+/** 宿主 settings 段名（小写连字符；settings.yaml 里即此段）。 */
+export const GOVERNOR_SETTINGS_NAMESPACE = "model-governor";
+
+/** 配置段 schema（schemastery；宿主 settings 系统按它解析/校验/持久化文档层）。
+ *  覆盖完整 GovernorConfig（limits + sessionHeader）：卡片只写 limits 路径，
+ *  sessionHeader 留给文件手写——schema 若不含它，解析层会把文件里的会话头配置剥掉。 */
+export const GOVERNOR_SETTINGS_SCHEMA = z.object({
+  limits: z.object({
+    defaults: z.object({
+      rpm: z.number().min(1),
+      tpm: z.number().min(1),
+      maxConcurrent: z.number().min(1),
+    }),
+    providers: z.dict(
+      z.object({
+        rpm: z.number().min(1),
+        tpm: z.number().min(1),
+        maxConcurrent: z.number().min(1),
+      }),
+    ),
+    models: z.dict(
+      z.object({
+        rpm: z.number().min(1),
+        tpm: z.number().min(1),
+        maxConcurrent: z.number().min(1),
+      }),
+    ),
+  }),
+  sessionHeader: z.object({
+    providers: z.array(z.string()),
+    mode: z.union([z.const("session-id"), z.const("uuid")]),
+    debug: z.boolean(),
+    debugFile: z.string(),
+  }),
+});
+
+/** 宿主 settings 面窄脸（research 同款读写位：installSection 注册段 / update 合并写 / mutate 路径删）。 */
+interface SettingsFace {
+  installSection?(owner: unknown, ns: string, schema: unknown, entry: unknown, hooks: unknown): void;
+  update?(ns: string, patch: unknown): Promise<void> | void;
+  mutate?(ns: string, ops: Array<{ op: "set" | "unset"; path: string[]; value?: unknown }>): Promise<void> | void;
+}
 
 /** 单模型限流读出条目（provider/model 键 + 生效限流）。 */
 export interface DescribeModelEntry {
@@ -186,6 +232,24 @@ function mergeObjects(base: unknown, patch: unknown): unknown {
   return out;
 }
 
+/** 补丁拆两路：null 叶走 mutate/unset 路径，其余走 update 合并（update 表达不了删除）。
+ *  sets 保持原嵌套形，unsets 为 {op:"unset", path} 列（path 为自顶向下键列）。 */
+function splitPatch(patch: Record<string, unknown>, prefix: string[], sets: Record<string, unknown>, unsets: Array<{ op: "unset"; path: string[] }>): void {
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === null) {
+      unsets.push({ op: "unset", path: [...prefix, key] });
+      continue;
+    }
+    if (isPlainRecord(value)) {
+      const child: Record<string, unknown> = {};
+      splitPatch(value, [...prefix, key], child, unsets);
+      if (Object.keys(child).length > 0) sets[key] = child;
+      continue;
+    }
+    sets[key] = value;
+  }
+}
+
 function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
   return value !== null && value !== undefined && typeof (value as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator] === "function";
 }
@@ -200,8 +264,19 @@ function recordDebug(ctx: unknown, file: string, entry: Record<string, unknown>)
 
 export class GovernorService {
   ctx: any;
-  /** 运行时 live 配置（bundle 行 config 为静态起点，configure 合并后即时生效，重启回落）。 */
-  config: GovernorConfig;
+  /** 装配时 bundle 行 config 归一（settings 段的 base 层；settings 缺席时也是 live 起点）。 */
+  private readonly bootConfig: GovernorConfig;
+  /** 当前权威配置源（settings 装配前返回 bootConfig；installSection 回灌后返回文档解析值，热推送即时跟随）。 */
+  private source: () => GovernorConfig;
+  /** settings 缺席时的进程内写面（单测/无 settings 环境沿旧语义：重启回落；settings 装配即废弃，文档为唯一真源）。 */
+  private overlay: Record<string, unknown> = {};
+  /** 宿主 settings 面（运行时 ctx.inject 延迟解析；插件级 inject 不等它，免 boot 卡死——research 同款）。
+   *  公开字段仅供装配与单测装面；Remote 收口仍以原型 marker 五方法为准，多一个字段不改变契约。 */
+  settingsFace: SettingsFace | null = null;
+  /** 当前生效配置（source + overlay 合并归一；读面每次现算，热推送无需 onChange 做任何事）。 */
+  get config(): GovernorConfig {
+    return normalizeConfig(mergeObjects(this.source(), this.overlay));
+  }
   typertRemote: { service: GovernorService; serviceKey: string; namespace: string };
   /** 双桶（provider 桶 + provider/model 桶由监听器各 acquire 一次，取 min 语义）。 */
   readonly buckets = new TokenBuckets();
@@ -218,8 +293,20 @@ export class GovernorService {
 
   constructor(ctx: any, config?: unknown) {
     this.ctx = ctx;
-    this.config = normalizeConfig(config ?? {});
+    this.bootConfig = normalizeConfig(config ?? {});
+    this.source = () => this.bootConfig;
     this.typertRemote = Object.freeze({ service: this, serviceKey: "governor", namespace: "governor" });
+  }
+
+  /** settings 段 base 层（bundle 行 config 归一快照；normalizeConfig 本就返回全新对象，不外泄引用）。 */
+  bootConfigForSettings(): GovernorConfig {
+    return normalizeConfig(this.bootConfig);
+  }
+
+  /** settings 装配回灌：文档解析值成为唯一真源，装配前的 overlay 写面作废（文档为准，不静默盖文件）。 */
+  retargetSource(source: () => GovernorConfig): void {
+    this.source = source;
+    this.overlay = {};
   }
 
   /** 宿主 llm 面（插件级 inject 保证在位；缺席即 fail-loud，静默降级会治成误报）。 */
@@ -319,15 +406,34 @@ export class GovernorService {
     if (patch.sessionHeader !== undefined) governor.sessionHeader = patch.sessionHeader;
     const govErrors = validateConfigPatch(governor);
     if (govErrors.length > 0) return { ok: false, applied: emptyApplied(), errors: govErrors };
-    if (Object.keys(governor).length > 0) this.applyGovernorPatch(governor);
+    if (Object.keys(governor).length > 0) {
+      const writeErrors = await this.writeGovernorPatch(governor);
+      if (writeErrors.length > 0) return { ok: false, applied: emptyApplied(), errors: writeErrors };
+    }
     return { ok: true, applied: { governor }, errors: [] };
   }
 
-  /** governor 切片并入 live（configure 与 probe 自动填入共用：合并→删 null→归一）。 */
-  private applyGovernorPatch(governor: Record<string, unknown>): void {
-    const merged = mergeObjects(this.config, governor);
-    deleteNullLeaves(merged);
-    this.config = normalizeConfig(merged);
+  /** governor 切片写入（configure 与 probe 自动填入共用）。
+   *  settings 面在位：set 进 update、null 删进 mutate/unset，落 settings.yaml + 热推送；
+   *  缺席（单测/无 settings 环境）：沿旧语义并入进程内 overlay，重启回落。返回中文错误列。 */
+  private async writeGovernorPatch(governor: Record<string, unknown>): Promise<string[]> {
+    const face = this.settingsFace;
+    if (face?.update === undefined || face?.mutate === undefined) {
+      const merged = mergeObjects(this.overlay, governor);
+      deleteNullLeaves(merged);
+      this.overlay = isPlainRecord(merged) ? (merged as Record<string, unknown>) : {};
+      return [];
+    }
+    const sets: Record<string, unknown> = {};
+    const unsets: Array<{ op: "unset"; path: string[] }> = [];
+    splitPatch(governor, [], sets, unsets);
+    try {
+      if (unsets.length > 0) await face.mutate(GOVERNOR_SETTINGS_NAMESPACE, unsets);
+      if (Object.keys(sets).length > 0) await face.update(GOVERNOR_SETTINGS_NAMESPACE, sets);
+    } catch (err) {
+      return [`写入 model-governor 配置段失败：${errorOf(err)}`];
+    }
+    return [];
   }
 
   /** 发起 RPM 探测：校验参数后后台跑，立即返回 started（进度走 probeStatus 轮询）。
@@ -651,8 +757,22 @@ export class GovernorService {
           note: `首个请求即被限流（窗口已满或该 key 正被别处占用），未写入；请稍后重测`,
         };
       }
-      // 触顶 = 远端刚演示的事实（N 个放行、第 N+1 个被拒）：自动填入 provider 级 rpm。
-      this.applyGovernorPatch({ limits: { providers: { [run.provider]: { rpm: estimate } } } });
+      // 触顶 = 远端刚演示的事实（N 个放行、第 N+1 个被拒）：自动填入 provider 级 rpm（持久化，与手点应用同一路）。
+      const persistErrors = await this.writeGovernorPatch({ limits: { providers: { [run.provider]: { rpm: estimate } } } });
+      if (persistErrors.length > 0) {
+        return {
+          topped: true,
+          estimate,
+          lowerBound: estimate,
+          applied: false,
+          sent: run.sent,
+          succeeded: run.succeeded,
+          rateLimited: run.rateLimited,
+          elapsedMs,
+          ...(concurrencyNote !== undefined ? { concurrencyNote } : {}),
+          note: `测得约 ${estimate} RPM，但${persistErrors[0]}，未写入`,
+        };
+      }
       return {
         topped: true,
         estimate,
@@ -715,13 +835,28 @@ Object.defineProperty(GovernorService.prototype, REMOTE_METHODS_KEY, {
 export const name = "model-governor";
 export const inject: string[] = ["llm"];
 
-/** 装配：provide 服务 + fetch 补丁 + `llm/stream` 监听（顺序：双桶 acquire → header store 包裹 → next）。 */
+/** 装配：provide 服务 + settings 段注册 + fetch 补丁 + `llm/stream` 监听（顺序：双桶 acquire → header store 包裹 → next）。 */
 export function applyCordis(ctx: any, config?: unknown): GovernorService {
   const service = new GovernorService(ctx, config);
   ctx.reflect.provide("governor", service);
+  // 配置段装进宿主 settings 系统（served namespace = 插件卡派发的服务端半）：
+  // installSection 把 schema + base（bundle 行 config 归一）装进宿主，setSource 回灌 live 闭包；
+  // settings.yaml 变更热推送 → 限流即时生效。运行时 ctx.inject 延迟解析——写进插件级等待面
+  // 会让 loader 等一个不存在的服务，boot 卡死（research 同款，见其 cordis.ts）。
+  ctx.inject?.(["settings"], (settingsCtx: unknown) => {
+    const face = ((settingsCtx ?? {}) as { settings?: SettingsFace }).settings ?? null;
+    if (face?.installSection === undefined) return;
+    service.settingsFace = face;
+    face.installSection(ctx, GOVERNOR_SETTINGS_NAMESPACE, GOVERNOR_SETTINGS_SCHEMA, service.bootConfigForSettings(), {
+      setSource: (source: () => unknown) => {
+        service.retargetSource(() => normalizeConfig(source()));
+      },
+      onChange: () => {},
+    });
+  });
   installFetchPatch(ctx, service);
   installLlmStreamListener(ctx, service);
-  ctx.logger?.info?.("[model-governor] governor remote online（双桶限流 + 会话头监听已挂载）");
+  ctx.logger?.info?.("[model-governor] governor remote online（双桶限流 + 会话头监听已挂载 + settings 段 model-governor）");
   return service;
 }
 

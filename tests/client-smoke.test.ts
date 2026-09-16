@@ -7,7 +7,7 @@
  *  ⑤ dirty 出「未保存」+「丢弃」，丢弃只回基线不发写；写点唯一（configure 只在 apply 路径被调）；
  *  ⑥ 三态齐：读取中 status / 校验失败 aria-invalid+alert / 读取失败 alert+重试；探测结论走 status；
  *  ⑦ 点探测 → 按钮变倒计时；结论落地 → 回「探测」+ note 直显；倒计时点按 = 取消且失败不静默吞；
- *  ⑧ 常显作用域人话（“只在本次运行有效，重启恢复原值”，本卡不落设置文档）+ data-gvr-ui 自报常路/降级。
+ *  ⑧ 持久化时代无作用域说明（写进 settings 文档，重启仍在）+ data-gvr-ui 自报常路/降级。
  *
  *  桩说明：react / react-dom / 宿主 primitives 都不在本包 dependencies（浏览器半 require 的是宿主
  *  冻结种子表里的模块），此处手写桩并把「种子表外的 require」直接判红——降级路径不许被静默走到。
@@ -262,7 +262,7 @@ test("渲染：治理单行（RPM+数字框+应用+探测）走 primitives 常�
   assert.equal(inputOf(tree).props["aria-label"], "RPM", "席位范本是 span 字段名 + 控件 aria-label（不套 §4.2 htmlFor）");
   assert.deepEqual(texts(tree), ["应用", "探测"], "同行两按钮：应用在前、探测在后，无清除");
   assert.ok(btn(tree, "探测")!.props.title.includes("自动测 RPM"), "探测按钮 title 说明用途");
-  assert.ok(textOf(tree).includes("重启 host 后恢复原值"), "写的是运行时 live 配置，必须行内说清（不落设置文档）");
+  assert.ok(!textOf(tree).includes("重启"), "写进 settings 文档即持久，不再挂“重启恢复”说明（那句是内存时代的遗物）");
   assert.equal(findAll(tree, (n) => n.props?.className === "gvr-seat")[0].props["data-gvr-ui"], "host", "常路必须自报家门（截图/DOM 一眼可辨走的哪条）");
 });
 

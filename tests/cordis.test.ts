@@ -60,10 +60,12 @@ function makeCtx(opts: { llm?: any } = {}): {
   ctx: StubCtx;
   provided: Record<string, unknown>;
   listeners: Array<{ event: string; fn: Function; opts: unknown }>;
+  injectCalls: Array<{ names: string[]; cb: (face: unknown) => void }>;
   logs: string[];
 } {
   const provided: Record<string, unknown> = {};
   const listeners: Array<{ event: string; fn: Function; opts: unknown }> = [];
+  const injectCalls: Array<{ names: string[]; cb: (face: unknown) => void }> = [];
   const logs: string[] = [];
   const ctx: StubCtx = {
     reflect: {
@@ -82,13 +84,17 @@ function makeCtx(opts: { llm?: any } = {}): {
       if (serviceName === "llm") return opts.llm;
       return undefined;
     },
+    inject: (names: string[], cb: (face: unknown) => void) => {
+      injectCalls.push({ names, cb });
+      return () => {};
+    },
     effect: (fn: () => () => void) => fn(),
     logger: {
       info: (message: string) => logs.push(message),
       warn: (message: string) => logs.push(message),
     },
   };
-  return { ctx, provided, listeners, logs };
+  return { ctx, provided, listeners, injectCalls, logs };
 }
 
 function streamListenerOf(listeners: Array<{ event: string; fn: Function; opts: unknown }>): Function {
@@ -695,4 +701,122 @@ test("probe：非法参数中文拒收；status/cancel 无 provider 行为", asy
   assert.deepEqual(await svc.probeStatus({}), { state: "idle" });
   const noTarget = await svc.cancelProbe({});
   assert.equal(noTarget.ok, false);
+});
+
+/* ---------- 持久化链路（settings 段 model-governor：UI 上改的必须落盘，重启仍在） ---------- */
+
+/** 测试侧深合并（数组/标量整体替换；只供假 settings 文档层用）。 */
+function testMerge(base: unknown, patch: unknown): unknown {
+  if (typeof base !== "object" || base === null || typeof patch !== "object" || patch === null || Array.isArray(patch)) return patch;
+  const out: Record<string, unknown> = { ...(base as Record<string, unknown>) };
+  for (const [key, value] of Object.entries(patch as Record<string, unknown>)) out[key] = testMerge(out[key], value);
+  return out;
+}
+
+function testDeletePath(root: Record<string, unknown>, path: string[]): void {
+  let node: unknown = root;
+  for (let i = 0; i < path.length - 1; i++) {
+    if (typeof node !== "object" || node === null) return;
+    node = (node as Record<string, unknown>)[path[i]];
+  }
+  if (typeof node === "object" && node !== null) delete (node as Record<string, unknown>)[path[path.length - 1]];
+}
+
+/** 假宿主 settings 面（内存文档 + base/用户层合并 + 写后 onChange 热推送，供持久化链路测试）。 */
+function makeFakeSettings(initialUser: Record<string, unknown> = {}) {
+  const calls: { update: unknown[]; mutate: unknown[]; install: unknown[] } = { update: [], mutate: [], install: [] };
+  let entry: { ns: string; schema: unknown; base: unknown; hooks: any } | null = null;
+  let user: Record<string, unknown> = JSON.parse(JSON.stringify(initialUser)) as Record<string, unknown>;
+  const resolved = () => testMerge(JSON.parse(JSON.stringify(entry!.base)), user);
+  return {
+    calls,
+    get user() {
+      return user;
+    },
+    face: {
+      installSection: (owner: unknown, ns: string, schema: unknown, base: unknown, hooks: any) => {
+        calls.install.push({ ns });
+        entry = { ns, schema, base, hooks };
+        hooks.setSource(() => resolved());
+        hooks.onChange();
+      },
+      update: async (ns: string, patch: unknown) => {
+        calls.update.push({ ns, patch });
+        user = testMerge(user, patch) as Record<string, unknown>;
+        entry!.hooks.onChange();
+      },
+      mutate: async (ns: string, ops: Array<{ op: string; path: string[] }>) => {
+        calls.mutate.push({ ns, ops });
+        for (const op of ops) {
+          assert.equal(op.op, "unset");
+          testDeletePath(user, op.path);
+        }
+        entry!.hooks.onChange();
+      },
+    },
+  };
+}
+
+/** 触发 applyCordis 在装配时登记的 settings 延迟回调（走真接线，不是手演 installSection）。 */
+function attachFakeSettings(made: { injectCalls: Array<{ names: string[]; cb: (face: unknown) => void }> }, fake: { face: unknown }): void {
+  const hit = made.injectCalls.find((c) => c.names.includes("settings"));
+  assert.ok(hit, "applyCordis 必须经运行时 ctx.inject 接 settings（插件级等待面禁等 settings，免 boot 卡死）");
+  hit.cb({ settings: fake.face });
+}
+
+test("持久化：configure 落 settings.update + 热推送读回（UI 上改的重启仍在）", async () => {
+  const made = makeCtx({ llm: makeLlm() });
+  const svc = applyCordis(made.ctx, {});
+  const fake = makeFakeSettings();
+  attachFakeSettings(made, fake);
+  assert.deepEqual(fake.calls.install, [{ ns: "model-governor" }], "段名固定 model-governor（settings.yaml 里即此段）");
+  const result = await svc.configure({ limits: { providers: { opencode: { rpm: 30 } } } });
+  assert.equal(result.ok, true);
+  assert.equal(fake.calls.update.length, 1, "必须走 settings.update 落盘，不是只改内存");
+  assert.deepEqual((fake.calls.update[0] as any).patch, { limits: { providers: { opencode: { rpm: 30 } } } });
+  assert.deepEqual(
+    (await svc.describe({ provider: "opencode", model: "m" })).providerLimits,
+    { rpm: 30 },
+    "热推送：写后读面即时见新值（onChange 零活可省因读面每次现算）",
+  );
+});
+
+test("持久化：空输入删 RPM 走 mutate/unset（文档层删除，不是写 null）", async () => {
+  const made = makeCtx({ llm: makeLlm() });
+  const svc = applyCordis(made.ctx, {});
+  const fake = makeFakeSettings({ limits: { providers: { opencode: { rpm: 30 } } } });
+  attachFakeSettings(made, fake);
+  assert.deepEqual((await svc.describe({ provider: "opencode", model: "m" })).providerLimits, { rpm: 30 });
+  const result = await svc.configure({ limits: { providers: { opencode: { rpm: null } } } });
+  assert.equal(result.ok, true);
+  assert.equal(fake.calls.mutate.length, 1, "删除语义必须走 mutate/unset（update 表达不了删除）");
+  assert.deepEqual((fake.calls.mutate[0] as any).ops, [{ op: "unset", path: ["limits", "providers", "opencode", "rpm"] }]);
+  assert.deepEqual((await svc.describe({ provider: "opencode", model: "m" })).providerLimits, {}, "删完回落不限");
+});
+
+test("持久化：probe 触顶自动填入同样落盘（与手点应用同一路）", async () => {
+  const made = makeCtx({ llm: undefined });
+  const svc = applyCordis(made.ctx, {});
+  const fake = makeFakeSettings();
+  attachFakeSettings(made, fake);
+  const stub = makeProbeLlm((n) => (n < 3 ? "ok" : "limited"));
+  made.ctx.get = (
+    (_inner: unknown) => (_name: string) =>
+      _inner
+  )(stub);
+  assert.equal((await svc.probe({ provider: "p", phaseA: 10, bursts: [], maxRequests: 20 })).ok, true);
+  const result = await waitProbeDone(svc, "p");
+  assert.equal(result.topped, true);
+  assert.equal(result.applied, true);
+  assert.equal(fake.calls.update.length, 1, "自动填入必须落盘（结论行写了“已自动填入”，内存填入是骗人）");
+  assert.deepEqual((fake.user as any).limits.providers.p, { rpm: 3 }, "文档层留痕，重启仍在");
+});
+
+test("持久化：settings 缺席沿旧 overlay（单测/无 settings 环境不炸，重启回落）", async () => {
+  const made = makeCtx({ llm: makeLlm() });
+  const svc = applyCordis(made.ctx, {});
+  assert.equal(svc.settingsFace, null, "无 settings 回调即无面");
+  const result = await svc.configure({ limits: { providers: { opencode: { rpm: 30 } } } });
+  assert.equal(result.ok, true);
+  assert.deepEqual((await svc.describe({ provider: "opencode", model: "m" })).providerLimits, { rpm: 30 }, "overlay 即时生效不断流");
 });

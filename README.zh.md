@@ -23,7 +23,7 @@ dsh plugin --profile <your-profile> add ./path/to/dsh-plugin-model-governor
 
 ## 配置
 
-插件行在 profile 的 `cordis.patch.yml` 里（bundle 缺省为空 = 纯自带行为）。所有键可选：
+插件行在 profile 的 `cordis.patch.yml` 里（bundle 缺省为空 = 纯自带行为）。它是 base 缺省层：页面上点的 `应用` / 探测自动填入写进 `settings.yaml` 的 `model-governor` 段并盖在它上面，重启仍在。所有键可选：
 
 ```yaml
 - insert:
@@ -52,8 +52,8 @@ dsh plugin --profile <your-profile> add ./path/to/dsh-plugin-model-governor
 - **消费席位下发的事实**：槽给的是 `{provider, configured, keyConfigured}`。草稿卡（「添加提供方」还没落盘）整行不出；没配凭据的卡只出一句 muted 说明，不给注定失败的写件。
 - **读数与写入同源**：框里显示 `describe({provider}).providerLimits`，即服务商桶自己的执法口径（`providers[route]` → `defaults`），也正是 `configure({limits:{providers:{[route]:{rpm}}}})` 写进去的那一维。模型级覆盖留在 `models[].limits`，不串进本行。
 - **草稿态看得见**：改框即标「未保存」并出现「丢弃」（回服务端值，绝不发写）；写点仍然只有「应用」一处。
-- **作用域用人话写在行内**：这里改的 RPM 只在本次运行有效，重启 host 后恢复原值——所以行下常显这句，否则它长得像会持久化的设置项。席位另带 `data-gvr-ui="host|fallback"` 自报走的是宿主件还是本地降级，截图/DOM 一眼可辨。
-- 点 `探测` 后该按钮本身变成剩余秒倒计时（再点=取消；取消失败会写明原因，不静默吞）；结束或失败都变回 `探测`，结论行由 `role="status"` / `role="alert"` 承载（读取失败带「重试」）。空=不限。其余经 `settings.yaml` 配置（见上文配置节）。
+- **写下去就是永久的**：`应用` 与探测触顶自动填入都经 `configure` 同一路落进宿主 settings 文档（`model-governor` 段，`settings.yaml`），热推送即时生效，重启仍在。`cordis.patch.yml` 的 config 行是 base 缺省（空 = 纯自带行为），文档用户层盖在它上面；`sessionHeader` 暂无 UI，只走文件。席位另带 `data-gvr-ui="host|fallback"` 自报走的是宿主件还是本地降级，截图/DOM 一眼可辨。
+- 点 `探测` 后该按钮本身变成剩余秒倒计时（再点=取消；取消失败会写明原因，不静默吞）；结束或失败都变回 `探测`，结论行由 `role="status"` / `role="alert"` 承载（读取失败带「重试」）。空=删除该卡 RPM（回落上层）。其余经 `settings.yaml` 配置（见上文配置节）。
 
 ## 浏览器 E2E（UI 验证）
 

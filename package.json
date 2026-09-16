@@ -72,5 +72,8 @@
   "lint-staged": {
     "*.{ts,tsx,js,mjs,cjs,json,jsonc,md,yml,yaml,html}": "prettier --write"
   },
-  "packageManager": "pnpm@11.5.3"
+  "packageManager": "pnpm@11.5.3",
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.2"
+  }
 }

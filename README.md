@@ -23,7 +23,7 @@ dsh plugin --profile <your-profile> add ./path/to/dsh-plugin-model-governor
 
 ## Configure
 
-The plugin row lives in the profile's `cordis.patch.yml` (or the bundle default, which is empty = builtins only). All keys optional:
+The plugin row lives in the profile's `cordis.patch.yml` (or the bundle default, which is empty = builtins only). It is the base-default layer: UI `应用` clicks and probe auto-applies land in the `model-governor` section of `settings.yaml`, win over it, and survive restarts. All keys optional:
 
 ```yaml
 - insert:
@@ -52,8 +52,8 @@ One line per provider card on Settings → Models: `RPM` + number box + `应用`
 - **Seat facts are consumed**: the slot hands down `{provider, configured, keyConfigured}`. Draft cards (an unsaved "add provider" row) render nothing; a card without a configured credential renders one muted line instead of controls that could only fail.
 - **Readout and write share one source**: the box shows `describe({provider}).providerLimits` — the provider bucket's own enforcement value (`providers[route]` → `defaults`), i.e. exactly what `configure({limits:{providers:{[route]:{rpm}}}})` writes. Model-level overrides stay in `models[].limits` and never leak into the row.
 - **Draft state is visible**: editing marks the row 未保存 and adds 丢弃 (revert to the server value — never a write); `应用` stays the only write path.
-- **Runtime scope, stated in the row itself in plain words**: RPM edits apply to this run's live config only ("只在本次运行有效，重启 host 后恢复原值"); a restart reverts to the configured value. The row says so permanently, since otherwise it looks like a persisted setting. The seat also self-reports `data-gvr-ui="host|fallback"` so a screenshot or DOM dump shows whether host primitives or the local fallback rendered.
-- Clicking `探测` turns that button into a remaining-seconds countdown (click again to cancel — a failed cancel is reported, not swallowed). When a run ends or fails, the button flips back to `探测` and a verdict line follows, carried by `role="status"` / `role="alert"` (a failed read gets 重试). Empty input = unlimited. Other configuration goes through `settings.yaml` (see Configure above).
+- **Writes are durable**: `应用` and topped-probe auto-apply share one path into the host settings document (`model-governor` section in `settings.yaml`), hot-pushed live and restart-safe. The `cordis.patch.yml` `config` row is the base default (empty = builtins only); the document user layer wins over it. `sessionHeader` has no UI yet and stays file-managed. The seat also self-reports `data-gvr-ui="host|fallback"` so a screenshot or DOM dump shows whether host primitives or the local fallback rendered.
+- Clicking `探测` turns that button into a remaining-seconds countdown (click again to cancel — a failed cancel is reported, not swallowed). When a run ends or fails, the button flips back to `探测` and a verdict line follows, carried by `role="status"` / `role="alert"` (a failed read gets 重试). Empty input deletes that card's RPM (falls back up). Other configuration goes through `settings.yaml` (see Configure above).
 
 ## Browser E2E (UI verification)
 

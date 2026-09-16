@@ -98,7 +98,7 @@ uiScenarioSuite({
           throw new Error(`同行四件不在一条水平线上（中线 y=${JSON.stringify(ys)}）——竖排/换行即红`);
         if (!["host", "fallback"].includes(await page.evaluate(`document.querySelector(".gvr-seat")?.getAttribute("data-gvr-ui") || ""`)))
           throw new Error("席位缺 data-gvr-ui 诊断位（必须自报走宿主件还是本地降级）");
-        if (!text.includes("重启 host 后恢复原值")) throw new Error("缺作用域人话（本卡写运行时 live 配置，不落设置文档）");
+        if (text.includes("重启")) throw new Error("写进 settings 文档即持久，不该再挂“重启恢复”说明");
         await page.screenshot({ path: "/tmp/gov-seat.png" });
       },
     },
