@@ -247,6 +247,21 @@ test("describe：单模型限流读出（provider/model 键 + 生效限流）", 
   assert.deepEqual(result.models[0], { provider: "opencode", model: "qwen3-coder", limits: {} });
 });
 
+test("describe：providerLimits 给服务商桶执法口径（与模型级生效值本就不同源）", async () => {
+  const { ctx } = makeCtx({ llm: makeLlm() });
+  const svc = applyCordis(ctx, {});
+  await svc.configure({ limits: { defaults: { rpm: 100 } } });
+  await svc.configure({ limits: { providers: { opencode: { rpm: 30 } } } });
+  await svc.configure({ limits: { models: { "opencode/qwen3-coder": { rpm: 5 } } } });
+  const byProvider = await svc.describe({ provider: "opencode" });
+  assert.deepEqual(byProvider.providerLimits, { rpm: 30 }, "卡片写的是 providers[route].rpm，读数必须同源于服务商桶");
+  assert.deepEqual(byProvider.models[0].limits, { rpm: 5 }, "模型桶仍按三维合并（v5 拿它当卡片读数即串台）");
+  const one = await svc.describe({ provider: "opencode", model: "qwen3-coder" });
+  assert.deepEqual(one.providerLimits, { rpm: 30 }, "带 model 过滤时服务商口径照给");
+  const all = await svc.describe(undefined);
+  assert.equal("providerLimits" in all, false, "未按服务商过滤就不给服务商口径（不给假值）");
+});
+
 test("describe：读出不碰模型元数据（无 resolve 系调用也照常出数）", async () => {
   let metaCalls = 0;
   const llm = makeLlm({

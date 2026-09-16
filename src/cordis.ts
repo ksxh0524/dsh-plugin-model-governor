@@ -39,6 +39,8 @@
  * - `describe` 只读装配：`buildDescribeInput` 归一 → 宿主 `listModels`/`listProviders` 取 id
  *   → 附 `effectiveLimits`（模型 → 服务商 → 全局默认逐维合并）。纯限流读出，不读档位；
  *   宿主 llm 面挂了透传错误（fail-loud，不吞成空表）。
+ *   filter.provider 在场时另附 `providerLimits`（服务商桶执法口径：provider→defaults，不掺模型级覆盖）——
+ *   卡片写的就是 providers[route].rpm，读数必须同源于此；取 models[0].limits 在首模型带覆盖时显示与写入不同源。
  *   provider 缺席但 model 在场时按 model 精确过滤（缺席≠不过滤）。
  * - `configure` 只认 `{limits?, sessionHeader?}`：校验后并入**运行时 live 配置**（bundle 行
  *   config 是静态起点，重启回落）；未知顶层键直接报错，禁静默吞键。某维写 `null` 即删掉
@@ -82,6 +84,10 @@ export interface DescribeModelEntry {
 export interface DescribeResult {
   filter: DescribeInput;
   models: DescribeModelEntry[];
+  /** 服务商桶的执法口径（provider→defaults 逐维合并；缺省维即不限，故可能是 `{}`）。
+   *  仅当 filter.provider 在场时给出——那一维就是 `configure({limits:{providers:{[route]:…}}})` 写进去的值。
+   *  卡片读数取这个，不取 `models[0].limits`（首模型带模型级覆盖时会显示成模型值）。 */
+  providerLimits?: LimitDims;
 }
 
 /** configure 写回结果（域内失败一律返回值，不抛）。 */
@@ -261,7 +267,7 @@ export class GovernorService {
     }
   }
 
-  /** 限流读出：按 filter 列模型 id 并附生效限流（不读档位、不抛错）。 */
+  /** 限流读出：按 filter 列模型 id 并附生效限流（不读档位、不抛错）；filter.provider 在场时另附服务商桶执法口径。 */
   async describe(filter: unknown): Promise<DescribeResult> {
     const narrowed = (typeof filter === "object" && filter !== null ? filter : {}) as {
       provider?: unknown;
@@ -285,7 +291,10 @@ export class GovernorService {
         }
       }
     }
-    return { filter: input, models };
+    const out: DescribeResult = { filter: input, models };
+    // 服务商桶口径与模型列表同源给出：卡片写 providers[route]，读就必须是这里（审查中⑦）。
+    if (input.provider !== undefined) out.providerLimits = effectiveProviderLimits(this.config, input.provider);
+    return out;
   }
 
   private describeOne(provider: string, model: string): DescribeModelEntry {
