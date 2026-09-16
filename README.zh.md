@@ -1,6 +1,6 @@
 # dsh-plugin-model-governor
 
-DSH 模型治理面：每张服务商卡片一行 RPM（只排队、不拒单），RPM 探测（触顶自动填入），外加 OpenCode 会话头兼容。行为全部经 `settings.yaml` / 治理配置切片配置；设置页 UI 为每卡 RPM 行与探测行。
+DSH 模型治理面：每张服务商卡片一行 RPM（只排队、不拒单），RPM 探测（触顶自动填入），外加 OpenCode 会话头兼容。行为全部经 `settings.yaml` / 治理配置切片配置；设置页 UI 为宿主模型卡内的一行 RPM。
 
 ## 功能
 
@@ -47,7 +47,19 @@ dsh plugin --profile <your-profile> add ./path/to/dsh-plugin-model-governor
 
 ## 界面
 
-设置 → 模型每张卡片只一行：`RPM` + 数字框 + `应用` + `探测`，此外什么都没有——无标题、无徽标、无页脚区。点 `探测` 后按钮本身变成剩余秒倒计时（再点=取消）；结束或失败都变回 `探测`，行下跟一句话结论（触顶自动填入）。空=不限。其余经 `settings.yaml` 配置（见上文配置节）。
+设置 → 模型每张卡片只一行：`RPM` + 数字框 + `应用` + `探测`，此外什么都没有。卡壳（边框/底色/圆角/padding）归宿主自己的 `<li class="rowCard">`：本包只出一个内容 div，控件用宿主 primitives（`Input`、`Button` sm = 28px/r14），配色全走 `--dsw-*` 令牌并经 `<style data-plugin="model-governor">` 注入（STANDARDS §4.5）。
+
+- **消费席位下发的事实**：槽给的是 `{provider, configured, keyConfigured}`。草稿卡（「添加提供方」还没落盘）整行不出；没配凭据的卡只出一句 muted 说明，不给注定失败的写件。
+- **读数与写入同源**：框里显示 `describe({provider}).providerLimits`，即服务商桶自己的执法口径（`providers[route]` → `defaults`），也正是 `configure({limits:{providers:{[route]:{rpm}}}})` 写进去的那一维。模型级覆盖留在 `models[].limits`，不串进本行。
+- **草稿态看得见**：改框即标「未保存」并出现「丢弃」（回服务端值，绝不发写）；写点仍然只有「应用」一处。
+- **作用域写在行内**：写的是本次运行的 live 配置，bundle 的 `config` 行仍是起点、重启即回落——所以行下常显这句，否则它长得像会持久化的设置项。
+- 点 `探测` 后该按钮本身变成剩余秒倒计时（再点=取消；取消失败会写明原因，不静默吞）；结束或失败都变回 `探测`，结论行由 `role="status"` / `role="alert"` 承载（读取失败带「重试」）。空=不限。其余经 `settings.yaml` 配置（见上文配置节）。
+
+## 浏览器 E2E（UI 验证）
+
+`pnpm check:browser` 自起一次性实例，真驱动无头 Chrome 进「设置 → 模型」，断言席位形态而非像素：不重复宿主卡壳、
+不留内联 `style`、CSS 确经 `<style data-plugin>` 注入通道到达，且三态各有其形（可写行命中宿主 primitives 规格 /
+抑制卡不给写件 / 读取失败有 `role="alert"` + 重试）。浏览器半改动必须过它（STANDARDS §4.5 + §5，dsh-check 第 12 门）。
 
 ## 致谢
 

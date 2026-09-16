@@ -1,6 +1,6 @@
 # dsh-plugin-model-governor
 
-DSH model governance plane: one RPM line per provider card (never rejects, only delays), RPM probing with auto-apply, plus OpenCode session-header compat. All behavior is configured via `settings.yaml` / the governor config slice; the settings-page UI is the per-card RPM row and probe row.
+DSH model governance plane: one RPM line per provider card (never rejects, only delays), RPM probing with auto-apply, plus OpenCode session-header compat. All behavior is configured via `settings.yaml` / the governor config slice; the settings-page UI is a single per-provider RPM row inside the host's Models card.
 
 ## Features
 
@@ -47,7 +47,21 @@ The plugin row lives in the profile's `cordis.patch.yml` (or the bundle default,
 
 ## GUI
 
-One line per provider card on Settings → Models: `RPM` + number box + `应用` + `探测`; nothing else — no titles, badges, or footer panels. Clicking `探测` turns the button itself into a remaining-seconds countdown (click again to cancel); when it ends or fails the button flips back to `探测` with a one-line verdict below (auto-applied on topped runs). Empty input = unlimited. Configure via `settings.yaml` (see Configure above).
+One line per provider card on Settings → Models: `RPM` + number box + `应用` + `探测` — nothing else. The card shell (border, background, radius, padding) belongs to the host's own `<li class="rowCard">`: this half emits a plain content div, uses host primitives (`Input`, `Button` sm = 28px/r14) and `--dsw-*` tokens injected through `<style data-plugin="model-governor">` (STANDARDS §4.5).
+
+- **Seat facts are consumed**: the slot hands down `{provider, configured, keyConfigured}`. Draft cards (an unsaved "add provider" row) render nothing; a card without a configured credential renders one muted line instead of controls that could only fail.
+- **Readout and write share one source**: the box shows `describe({provider}).providerLimits` — the provider bucket's own enforcement value (`providers[route]` → `defaults`), i.e. exactly what `configure({limits:{providers:{[route]:{rpm}}}})` writes. Model-level overrides stay in `models[].limits` and never leak into the row.
+- **Draft state is visible**: editing marks the row 未保存 and adds 丢弃 (revert to the server value — never a write); `应用` stays the only write path.
+- **Runtime scope, stated in the row itself**: writes land in this run's live config; the bundle's `config` line remains the starting point and a restart reverts. The row says so permanently, since otherwise it looks like a persisted setting.
+- Clicking `探测` turns that button into a remaining-seconds countdown (click again to cancel — a failed cancel is reported, not swallowed). When a run ends or fails, the button flips back to `探测` and a verdict line follows, carried by `role="status"` / `role="alert"` (a failed read gets 重试). Empty input = unlimited. Other configuration goes through `settings.yaml` (see Configure above).
+
+## Browser E2E (UI verification)
+
+`pnpm check:browser` boots a disposable instance and drives headless Chrome into Settings → Models, asserting the
+seat's form rather than pixels: no duplicated card shell, no inline `style` attributes, CSS arrives through the
+injected `<style data-plugin>` channel, and each of the three seat states has its own shape (writable row on host
+primitives specs / suppressed card with no controls / failed read with `role="alert"` + 重试). Browser-half changes
+must pass it (STANDARDS §4.5 + §5, dsh-check gate 12).
 
 ## Credits
 
