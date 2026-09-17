@@ -13,7 +13,10 @@ if [ -f docs/check.mjs ]; then
   # 索引仓：文档门（L0 预算/链接/登记/编号；零依赖 `node docs/check.mjs`）。
   node docs/check.mjs || exit 1
 else
-  # 代码仓：类型检查（无构建链：tsc --noEmit 是唯一的静态网，commit 时阻断；
-  # 域仓根为四包逐仓形态，跑自家 typecheck 脚本）。
+  # 代码仓：类型检查 + 标准门（dsh-check 注册件存在即跑，不存在只跑类型；
+  # 全量业务测试留给 pre-push/CI，commit 只拦"标准红灯不过夜"）。
   pnpm typecheck || exit 1
+  if [ -f tests/standard.test.ts ]; then
+    node --test tests/standard.test.ts || exit 1
+  fi
 fi
