@@ -55,6 +55,13 @@ dsh plugin --profile <your-profile> add ./path/to/dsh-plugin-model-governor
 - **写下去就是永久的**：`应用` 与探测触顶自动填入都经 `configure` 同一路落进宿主 settings 文档（`model-governor` 段，`settings.yaml`），热推送即时生效，重启仍在。`cordis.patch.yml` 的 config 行是 base 缺省（空 = 纯自带行为），文档用户层盖在它上面；`sessionHeader` 暂无 UI，只走文件。席位另带 `data-gvr-ui="host|fallback"` 自报走的是宿主件还是本地降级，截图/DOM 一眼可辨。
 - 点 `探测` 后该按钮本身变成剩余秒倒计时（再点=取消；取消失败会写明原因，不静默吞）；结束或失败都变回 `探测`，结论行由 `role="status"` / `role="alert"` 承载（读取失败带「重试」）。空=删除该卡 RPM（回落上层）。其余经 `settings.yaml` 配置（见上文配置节）。
 
+## 已知边界
+
+- 只认领模型卡的服务商行（席位写死）；其他设置面一概不碰。
+- 排队只延迟——不拒单、不抢占运行中的调用；等待不计入 `maxRetries`。
+- `settings.yaml` 用户层永远盖掉 `cordis.patch.yml` 的 base 行；空 bundle 配置 = 纯自带行为（不限流 + OpenCode 会话头默认开）。
+- `sessionHeader` 只走文件（暂无 UI）；`noteOutcome` 只收信号，给将来的熔断器留口，不改流。
+
 ## 浏览器 E2E（UI 验证）
 
 `pnpm check:browser` 自起一次性实例，真驱动无头 Chrome 进「设置 → 模型」，断言席位形态而非像素：不重复宿主卡壳、

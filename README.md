@@ -55,6 +55,13 @@ One line per provider card on Settings → Models: `RPM` + number box + `应用`
 - **Writes are durable**: `应用` and topped-probe auto-apply share one path into the host settings document (`model-governor` section in `settings.yaml`), hot-pushed live and restart-safe. The `cordis.patch.yml` `config` row is the base default (empty = builtins only); the document user layer wins over it. `sessionHeader` has no UI yet and stays file-managed. The seat also self-reports `data-gvr-ui="host|fallback"` so a screenshot or DOM dump shows whether host primitives or the local fallback rendered.
 - Clicking `探测` turns that button into a remaining-seconds countdown (click again to cancel — a failed cancel is reported, not swallowed). When a run ends or fails, the button flips back to `探测` and a verdict line follows, carried by `role="status"` / `role="alert"` (a failed read gets 重试). Empty input deletes that card's RPM (falls back up). Other configuration goes through `settings.yaml` (see Configure above).
 
+## Known limits
+
+- Only the Models-card provider row is claimed (hard-wired seat); no other settings surface is touched.
+- Queueing only delays — it never rejects, never preempts a running call, and waiting never counts toward `maxRetries`.
+- The `settings.yaml` user layer always wins over the `cordis.patch.yml` base row; an empty bundle config = builtins only (unlimited + OpenCode session header on).
+- `sessionHeader` stays file-managed (no UI yet); `noteOutcome` only collects signals for a future breaker, never alters the stream.
+
 ## Browser E2E (UI verification)
 
 `pnpm check:browser` boots a disposable instance and drives headless Chrome into Settings → Models, asserting the
