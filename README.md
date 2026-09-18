@@ -61,6 +61,8 @@ One line per provider card on Settings → Models: `RPM` + number box + `应用`
 - Queueing only delays — it never rejects, never preempts a running call, and waiting never counts toward `maxRetries`.
 - The `settings.yaml` user layer always wins over the `cordis.patch.yml` base row; an empty bundle config = builtins only (unlimited + OpenCode session header on).
 - `sessionHeader` stays file-managed (no UI yet); `noteOutcome` only collects signals for a future breaker, never alters the stream.
+- Writable rows have no real-device coverage yet: disposable instances carry no credentials, so the seat runs suppressed and the write path plus probing are covered only by the offline harness.
+- A production-only layout anomaly (writable row rendered vertically) never reproduced locally; already hardened with explicit direction/alignment/flex plus a fallback pill and `data-gvr-ui` self-report — quote that value if seen again.
 
 ## Browser E2E (UI verification)
 

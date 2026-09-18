@@ -61,6 +61,8 @@ dsh plugin --profile <your-profile> add ./path/to/dsh-plugin-model-governor
 - 排队只延迟——不拒单、不抢占运行中的调用；等待不计入 `maxRetries`。
 - `settings.yaml` 用户层永远盖掉 `cordis.patch.yml` 的 base 行；空 bundle 配置 = 纯自带行为（不限流 + OpenCode 会话头默认开）。
 - `sessionHeader` 只走文件（暂无 UI）；`noteOutcome` 只收信号，给将来的熔断器留口，不改流。
+- 可写行暂缺真机覆盖：一次性实例没配凭据，席位走抑制态，写路径与探测只由离线 harness 覆盖。
+- 生产页独有的竖排显示异常本地从未复现，已加固（方向/对齐/伸缩显式＋降级药丸＋`data-gvr-ui` 自报）；再见到请报该值定位。
 
 ## 浏览器 E2E（UI 验证）
 
