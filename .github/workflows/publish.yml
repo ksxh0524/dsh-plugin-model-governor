@@ -1,10 +1,11 @@
 name: Publish
-# 打 tag 发 npm（token 版；bypass-2FA token 有效期至 2027-01，到期前切 OIDC trusted publishing）：
-#  git push tag v* → npm publish（读仓库 Secrets 的 NPM_TOKEN = npm Automation 令牌）。
-# 首版（全新包名）也可经此发出。
+# 打 tag 发 npm（OIDC trusted publishing，零 token）：
+#  git push tag v* → npm publish。
+# 前置：npmjs.com 包 Settings → Trusted Publisher 已绑
+#  ksxh0524/dsh-plugin-model-governor / publish.yml / allow npm publish。
 # tag 即发布点——推 tag 前本地三道门（pnpm check / husky）已过，此处不复跑测试；
 # 只做发布前对账：tag 号必须等于 package.json 的 version，防错版本误发。
-# workflow_dispatch 供漏触发时在默认分支上手动补发。
+# workflow_dispatch 供漏触发时（如 trusted publisher 晚于 tag 配置）在默认分支上手动补发。
 "on":
   push:
     tags: ["v*"]
@@ -14,12 +15,15 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      id-token: write # OIDC：trusted publishing 身份 + provenance 自动签名
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
+      # OIDC 要 npm ≥11.5.1（Node 22 自带 npm 10 会静默失败）；24 系自带已够，加一层兜底。
+      - run: npm install -g npm@latest
       - name: Version sanity（仅 tag 触发时校验）
         if: github.event_name == 'push'
         run: |
@@ -29,8 +33,7 @@ jobs:
             echo "tag v$TAG_VER ≠ package version $PKG_VER，拒发" >&2
             exit 1
           fi
-      # NODE_AUTH_TOKEN 挂在运行 npm publish 的 step 上（npm 直读该环境变量）；
-      # --ignore-scripts：prepare=husky 与发布无关（CI 无 devDeps，跑了必炸）。
+      # 此处必须没有 NODE_AUTH_TOKEN：OIDC 要求 token 位空着 npm 才会走 OIDC；
+      # 挂了 token 反而回退老路线撞 EOTP。
+      # --provenance 不用加：OIDC 下自动签名。
       - run: npm publish --access public --ignore-scripts
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
