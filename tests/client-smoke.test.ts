@@ -366,5 +366,6 @@ test("包络分支：网关 {ok:true,value} 包裹的 describe 同样读出服�
 test("源码形态纪律：过 provider-card 席位门（§4.5）与动效守卫门（§4.3）", () => {
   assert.deepEqual(collectProviderCardSeatViolations(CLIENT), [], "provider-card 席位门必须零判");
   assert.deepEqual(collectMotionGuardViolations(CLIENT), [], "动效守卫必须零判");
+  assert.match(CLIENT, /create: function \(\)/, "网关 ≥0.1.6 硬门：strict codec 必须带 create() 工厂");
   assert.ok(CLIENT.includes("--dsw-alias-") && CLIENT.includes("data-plugin"), "配色走设计令牌 + CSS 经注入通道（内联 style 承载不了态样式）");
 });

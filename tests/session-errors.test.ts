@@ -7,7 +7,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { SESSION_HEADER, headerValueFor, patchFetch, withStore, type SessionHeaderStore } from "../src/session-header.ts";
+import { SESSION_HEADER, describeSessionIdProblem, headerValueFor, patchFetch, withStore, type SessionHeaderStore } from "../src/session-header.ts";
 import { buildDescribeInput } from "../src/describe-input.ts";
 
 type Seen = { input: Parameters<typeof fetch>[0]; init: Parameters<typeof fetch>[1] | undefined };
@@ -54,11 +54,52 @@ test("patchFetch：无 store 时原样透传（非目标 provider 由 cordis 层
   assert.equal(new Headers(seen[0].init?.headers).has(SESSION_HEADER), false);
 });
 
-test("headerValueFor：session-id 复用原 id，空串不产值", () => {
+test("headerValueFor：session-id 复用修整后的原 id，空串/纯空白不产值", () => {
   const table = new Map<string, string>();
   assert.equal(headerValueFor("conv-42", "session-id", table), "conv-42");
   assert.equal(headerValueFor("", "session-id", table), undefined);
+  assert.equal(headerValueFor("   ", "session-id", table), undefined);
+  assert.equal(headerValueFor("  s-1  ", "session-id", table), "s-1");
   assert.equal(table.size, 0);
+});
+
+test("headerValueFor：非字符串一律不产值（不 String() 强转，免多会话撞头）", () => {
+  const table = new Map<string, string>();
+  for (const bad of [undefined, null, 42, 0, true, {}, [], ["s1"]]) {
+    assert.equal(headerValueFor(bad, "session-id", table), undefined);
+    assert.equal(headerValueFor(bad, "uuid", table), undefined);
+  }
+  assert.equal(table.size, 0, "脏输入不得污染 uuid 表");
+});
+
+test("headerValueFor：非法头字符不产值（换行/控制符/非 ASCII），uuid 表同样不落", () => {
+  const table = new Map<string, string>();
+  for (const bad of ["a\nb", "a\rb", "a\x00b", "a\x01b", "a\x7fb", "会话-1"]) {
+    assert.equal(headerValueFor(bad, "session-id", table), undefined);
+    assert.equal(headerValueFor(bad, "uuid", table), undefined);
+  }
+  assert.equal(table.size, 0);
+  // 头内空格合法（RFC 9110 field-content），照常透传。
+  assert.equal(headerValueFor("a b", "session-id", table), "a b");
+});
+
+test("headerValueFor：uuid 模式按修整后的 id 查表（边空格不另起一行）", () => {
+  const table = new Map<string, string>();
+  const first = headerValueFor("s1", "uuid", table);
+  assert.equal(headerValueFor("  s1  ", "uuid", table), first);
+  assert.equal(table.size, 1);
+});
+
+test("describeSessionIdProblem：跳过原因只定性不定量，合法输入无问题", () => {
+  assert.equal(describeSessionIdProblem(undefined), "missing");
+  assert.equal(describeSessionIdProblem(null), "missing");
+  assert.equal(describeSessionIdProblem(42), "non-string");
+  assert.equal(describeSessionIdProblem({}), "non-string");
+  assert.equal(describeSessionIdProblem(""), "empty");
+  assert.equal(describeSessionIdProblem("   "), "empty");
+  assert.equal(describeSessionIdProblem("a\nb"), "illegal-chars");
+  assert.equal(describeSessionIdProblem("会话"), "illegal-chars");
+  assert.equal(describeSessionIdProblem("s-1"), undefined);
 });
 
 test("headerValueFor：uuid 模式进程内按会话稳定、跨会话隔离", () => {

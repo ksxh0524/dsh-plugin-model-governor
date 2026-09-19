@@ -192,6 +192,30 @@ test("监听：目标 provider + sessionId 走 header store（fetch 捕获会话
   assert.equal(seen[0].headers.get(SESSION_HEADER), "s-1", "下游 fetch 须带上会话头（ALS store 穿越）");
 });
 
+test("header 跳过可观测：目标 provider 取值失败且开 debug 才记一笔", () => {
+  const made = makeCtx({ llm: makeLlm() });
+  const svc = applyCordis(made.ctx, { sessionHeader: { providers: ["opencode"], mode: "session-id", debug: true } });
+  assert.equal(svc.headerValueForRequest("opencode", undefined), undefined);
+  assert.equal(svc.headerValueForRequest("opencode", "a\nb"), undefined);
+  assert.equal(svc.headerValueForRequest("opencode", "s-1"), "s-1");
+  const skips = made.logs.filter((message) => message.includes("跳过"));
+  assert.equal(skips.length, 2, "两次取值失败各记一笔，成功不断言外不记跳过");
+  assert.ok(skips.some((message) => message.includes("missing")));
+  assert.ok(skips.some((message) => message.includes("illegal-chars")));
+});
+
+test("header 跳过静默：非目标 provider 或关 debug 不记", () => {
+  const made = makeCtx({ llm: makeLlm() });
+  const svc = applyCordis(made.ctx, {});
+  assert.equal(svc.headerValueForRequest("other", undefined), undefined);
+  assert.equal(svc.headerValueForRequest("opencode", undefined), undefined);
+  assert.deepEqual(
+    made.logs.filter((message) => message.includes("跳过")),
+    [],
+    "默认关 debug：跳过静默（成功路径同样不记）",
+  );
+});
+
 test("监听：非目标 provider 不加头", async () => {
   const seen: Array<{ headers: Headers }> = [];
   globalThis.fetch = (async (_input: any, init?: any) => {

@@ -4,10 +4,17 @@
  * 跨 turn 保住 prompt cache 亲和并治 400 MissingSessionID。本文件只放可单测的纯机制
  * （取值/透传包装/fetch 补丁），provider 过滤与 `next()` 调度归 cordis.ts 监听器。
  *
+ * 取值模式的权衡（调用方二选一，无两全）：
+ * - `session-id`：复用 DSH 会话 id 修整后的原文，跨 turn 且跨重启稳定；代价是把
+ *   内部会话 id 明文发给中继/上游（可被关联），且上游拿到的亲和粒度 = DSH 会话粒度。
+ * - `uuid`：按会话 id 派发进程内稳定的随机 uuid，不透明、不泄漏内部 id；代价是
+ *   进程重启即换，丢掉跨重启亲和。
+ *
  * 出处与许可：移植自 `dsh-opencode-session`（作者 nobu121，MIT License），原文
  * `~/.dsh/profiles/web/node_modules/dsh-opencode-session/lib/index.js`（216 行）。
- * 语义与原文逐行一致：header 已存在不覆盖、空 sessionId 不产值、uuid 模式进程内
- * 按 sessionId 稳定、withStore 逐次 `next()` 进 store 而 `return` 直透。
+ * 语义与原文逐行一致，仅取值侧收紧：非字符串/空白/非法头字符一律不产值（调用方
+ * 跳过 header 只限流，绝不把垃圾钉到上游）；header 已存在不覆盖、withStore 逐次
+ * `next()` 进 store 而 `return` 直透。
  */
 
 import { randomUUID } from "node:crypto";
@@ -27,16 +34,27 @@ export type AsyncStore<T> = {
   getStore(): T | undefined;
 };
 
-/** 为一个 DSH 会话 id 派生不透明头值（语义与原包 `headerValueFor` 一致）。
+/** HTTP field-value 的合法形（RFC 9110 §5.5：首尾禁空白，中间只许 SP/HTAB + 可见 ASCII）。
+ * DSH 会话 id 正常是短标识串，命中不了这条；命中即视为脏输入，宁可跳过 header 也不发。 */
+const FIELD_VALUE_RE = /^[\x21-\x7E]+(?:[ \t]+[\x21-\x7E]+)*$/;
+
+/** 为一个 DSH 会话 id 派生不透明头值（语义与原包 `headerValueFor` 一致，输入侧收紧）。
  *
- * - 空串 sessionId 无意义，返回 undefined（调用方应跳过 header 只限流）。
- * - `session-id` 模式直接复用 id：跨 turn 且跨重启稳定、同会话共享上游。
- * - `uuid` 模式按 sessionId 查表，缺失即 `randomUUID()` 落表：进程内稳定、
+ * - 非字符串（数字/对象等）一律返回 undefined：`String()` 强转会把不同会话压成
+ *   同一个 `"[object Object]"`，钉错上游还污染缓存。
+ * - 修整前后为空（`""` / 纯空白）无意义，返回 undefined（调用方应跳过 header 只限流）。
+ * - 含控制字符/`\r\n`/非 ASCII 即非法头值，返回 undefined（发出去会被 fetch 拒掉，
+ *   不如不发；`uuid` 模式同样不落表）。
+ * - `session-id` 模式返回修整后的原文：跨 turn 且跨重启稳定、同会话共享上游，
+ *   但内部会话 id 明文出境（见文件头权衡）。
+ * - `uuid` 模式按修整后的 id 查表，缺失即 `randomUUID()` 落表：进程内稳定、
  *   进程重启即换（不透明，但丢掉跨重启亲和）。
  */
 export function headerValueFor(sessionId: unknown, mode: SessionHeaderMode, table: Map<string, string>): string | undefined {
-  const raw = String(sessionId);
+  if (typeof sessionId !== "string") return undefined;
+  const raw = sessionId.trim();
   if (raw.length === 0) return undefined;
+  if (!FIELD_VALUE_RE.test(raw)) return undefined;
   if (mode !== "uuid") return raw;
   let value = table.get(raw);
   if (value === undefined) {
@@ -44,6 +62,17 @@ export function headerValueFor(sessionId: unknown, mode: SessionHeaderMode, tabl
     table.set(raw, value);
   }
   return value;
+}
+
+/** 解释一次取值跳过的原因（纯函数：cordis 层 debug 日志与单测共用，只定性不定量，
+ *  不回显原值——脏输入可能含换行，直接落盘即日志注入；输入合法返回 undefined）。 */
+export function describeSessionIdProblem(sessionId: unknown): "missing" | "non-string" | "empty" | "illegal-chars" | undefined {
+  if (sessionId === undefined || sessionId === null) return "missing";
+  if (typeof sessionId !== "string") return "non-string";
+  const raw = sessionId.trim();
+  if (raw.length === 0) return "empty";
+  if (!FIELD_VALUE_RE.test(raw)) return "illegal-chars";
+  return undefined;
 }
 
 /** withStore 产出的流形态：next/return/throw 三件齐（相对 AsyncIterableIterator

@@ -34,7 +34,7 @@
  *   → `next()` 恰调一次 → 头条件满足则 `withStore` 包裹后委托。
  *   并发槽在 `finally` 里双桶 `release`（S2 limiter.ts 合同：调用方负责归还，超额归还忽略）；
  *   `next()` 同步抛也先归还再透传；消费方提前 return（break/取消）跳过上报时在 `finally` 补报，
- *   `noteOutcome` 依然 exactly-once。`options.sessionId` 缺失或非目标 provider 只跳过 header，限流照做。
+ *   `noteOutcome` 依然 exactly-once。`options.sessionId` 缺失/非法或非目标 provider 只跳过 header，限流照做。
  * - 会话头机制移植自 `dsh-opencode-session`（作者 nobu121，MIT）：
  *   store 形 `{ value }` + `patchFetch` 由本文件在装配时安装（有 `ctx.effect` 则走 fiber 作用域，
  *   卸载自动还原；无则常驻补丁并注释说明）。provider 过滤与 `next()` 调度归本文件，取值/包装/
@@ -65,7 +65,15 @@ import {
   type LimitDims,
 } from "./config.ts";
 import { TokenBuckets } from "./limiter.ts";
-import { SESSION_HEADER, headerValueFor, patchFetch, withStore, type SessionHeaderMode, type SessionHeaderStore } from "./session-header.ts";
+import {
+  SESSION_HEADER,
+  describeSessionIdProblem,
+  headerValueFor,
+  patchFetch,
+  withStore,
+  type SessionHeaderMode,
+  type SessionHeaderStore,
+} from "./session-header.ts";
 import { buildDescribeInput, type DescribeInput } from "./describe-input.ts";
 import { classifyFinishReason, classifyThrown, normalizeProbeSpec, rampRps, summarizeProbe, type ProbeCallOutcome, type ProbeSpec } from "./probe.ts";
 
@@ -329,15 +337,19 @@ export class GovernorService {
     // 预留：breaker.note(_providerKey, _err) 落在这里。
   }
 
-  /** 本次请求是否进 header store（非目标 provider / 无 sessionId / 空值一律跳过 header，只限流）。 */
+  /** 本次请求是否进 header store（非目标 provider / 无 sessionId / 非字符串 / 空白 / 非法头字符一律跳过 header，只限流）。
+   *  跳过可观测：非目标 provider 是预期路径（静默）；目标 provider 取值失败且开了 debug 才记一笔（排 400 用，不开不扰）。 */
   headerValueForRequest(provider: string, sessionId: unknown): string | undefined {
     const header = this.config.sessionHeader;
     const providers = header?.providers ?? [];
     if (!providers.includes(provider)) return undefined;
-    if (sessionId === undefined || sessionId === null) return undefined;
     const mode: SessionHeaderMode = header?.mode ?? "session-id";
     const value = headerValueFor(sessionId, mode, this.uuidTable);
-    if (value !== undefined) this.logHeaderDebug(provider, sessionId, value);
+    if (value === undefined) {
+      this.logHeaderSkip(provider, sessionId);
+      return undefined;
+    }
+    this.logHeaderDebug(provider, sessionId, value);
     return value;
   }
 
@@ -354,6 +366,23 @@ export class GovernorService {
         session: String(sessionId),
         header: SESSION_HEADER,
         value,
+      });
+    }
+  }
+
+  private logHeaderSkip(provider: string, sessionId: unknown): void {
+    const header = this.config.sessionHeader;
+    if (header?.debug !== true && header?.debugFile === undefined) return;
+    const problem = describeSessionIdProblem(sessionId) ?? "unknown";
+    if (header.debug === true) {
+      this.ctx.logger?.info?.(`[model-governor] ${SESSION_HEADER} 跳过：provider "${provider}" 取值失败（${problem}，只限流不加头）`);
+    }
+    if (typeof header.debugFile === "string" && header.debugFile.length > 0) {
+      recordDebug(this.ctx, header.debugFile, {
+        ts: new Date().toISOString(),
+        provider,
+        header: SESSION_HEADER,
+        skipped: problem,
       });
     }
   }
