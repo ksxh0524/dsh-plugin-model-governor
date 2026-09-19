@@ -47,7 +47,7 @@ The plugin row lives in the profile's `cordis.patch.yml` (or the bundle default,
 
 ## GUI
 
-One line per provider card on Settings → Models: `RPM` + number box + `应用` + `探测` — nothing else. The card shell (border, background, radius, padding) belongs to the host's own `<li class="rowCard">`: this half emits a plain content div, uses host primitives (`Input`, `Button` sm = 28px/r14) and `--dsw-*` tokens injected through `<style data-plugin="model-governor">` (STANDARDS §4.5).
+One line per provider card on Settings → Models: `RPM` + number box + `应用` + `探测` — nothing else. The card shell (border, background, radius, padding) belongs to the host's own `<li class="rowCard">`: this half emits a plain content div, uses host primitives (`Input`, `Button` sm = 28px/r14) and `--dsw-*` tokens injected through `<style data-plugin="model-governor">` (index `docs/settings-pages.md` §4.5).
 
 - **Seat facts are consumed**: the slot hands down `{provider, configured, keyConfigured}`. Draft cards (an unsaved "add provider" row) render nothing; a card without a configured credential renders one muted line instead of controls that could only fail.
 - **Readout and write share one source**: the box shows `describe({provider}).providerLimits` — the provider bucket's own enforcement value (`providers[route]` → `defaults`), i.e. exactly what `configure({limits:{providers:{[route]:{rpm}}}})` writes. Model-level overrides stay in `models[].limits` and never leak into the row.
@@ -70,7 +70,7 @@ One line per provider card on Settings → Models: `RPM` + number box + `应用`
 seat's form rather than pixels: no duplicated card shell, no inline `style` attributes, CSS arrives through the
 injected `<style data-plugin>` channel, and each of the three seat states has its own shape (writable row on host
 primitives specs / suppressed card with no controls / failed read with `role="alert"` + 重试). Browser-half changes
-must pass it (STANDARDS §4.5 + §5, dsh-check gate 12).
+must pass it (index `docs/settings-pages.md` §4.5 + index `docs/runbooks/live-verify.md`, dsh-check gate 12).
 
 ## Credits
 

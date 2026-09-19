@@ -47,7 +47,7 @@ dsh plugin --profile <your-profile> add ./path/to/dsh-plugin-model-governor
 
 ## 界面
 
-设置 → 模型每张卡片只一行：`RPM` + 数字框 + `应用` + `探测`，此外什么都没有。卡壳（边框/底色/圆角/padding）归宿主自己的 `<li class="rowCard">`：本包只出一个内容 div，控件用宿主 primitives（`Input`、`Button` sm = 28px/r14），配色全走 `--dsw-*` 令牌并经 `<style data-plugin="model-governor">` 注入（STANDARDS §4.5）。
+设置 → 模型每张卡片只一行：`RPM` + 数字框 + `应用` + `探测`，此外什么都没有。卡壳（边框/底色/圆角/padding）归宿主自己的 `<li class="rowCard">`：本包只出一个内容 div，控件用宿主 primitives（`Input`、`Button` sm = 28px/r14），配色全走 `--dsw-*` 令牌并经 `<style data-plugin="model-governor">` 注入（索引仓 `docs/settings-pages.md` §4.5）。
 
 - **消费席位下发的事实**：槽给的是 `{provider, configured, keyConfigured}`。草稿卡（「添加提供方」还没落盘）整行不出；没配凭据的卡只出一句 muted 说明，不给注定失败的写件。
 - **读数与写入同源**：框里显示 `describe({provider}).providerLimits`，即服务商桶自己的执法口径（`providers[route]` → `defaults`），也正是 `configure({limits:{providers:{[route]:{rpm}}}})` 写进去的那一维。模型级覆盖留在 `models[].limits`，不串进本行。
@@ -68,7 +68,7 @@ dsh plugin --profile <your-profile> add ./path/to/dsh-plugin-model-governor
 
 `pnpm check:browser` 自起一次性实例，真驱动无头 Chrome 进「设置 → 模型」，断言席位形态而非像素：不重复宿主卡壳、
 不留内联 `style`、CSS 确经 `<style data-plugin>` 注入通道到达，且三态各有其形（可写行命中宿主 primitives 规格 /
-抑制卡不给写件 / 读取失败有 `role="alert"` + 重试）。浏览器半改动必须过它（STANDARDS §4.5 + §5，dsh-check 第 12 门）。
+抑制卡不给写件 / 读取失败有 `role="alert"` + 重试）。浏览器半改动必须过它（索引仓 `docs/settings-pages.md` §4.5 + 索引仓 `docs/runbooks/live-verify.md`，dsh-check 第 12 门）。
 
 ## 致谢
 

@@ -1,4 +1,4 @@
-/** rpm-line.ui.test.ts —— provider-card 席位件真机验证（STANDARDS §4.5 + §5 机器化）：
+/** rpm-line.ui.test.ts —— provider-card 席位件真机验证（索引仓 `docs/settings-pages.md` §4.5 + 索引仓 `docs/runbooks/live-verify.md` 机器化）：
  *  一次性实例走「设置 → 模型」，断言的是**席位形态**而非像素：
  *  ① 席位内容不自带卡壳（边框/底色归宿主那张 `<li class=rowCard>`）、无内联 style、CSS 走注入通道，
  *     崩脸件为 0；三态各自的形态在此收口（可写行走 primitives 规格 / 抑制态不给写件 / 失败态有 alert+重试）；
