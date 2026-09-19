@@ -1,5 +1,11 @@
 name: CI
-# 本地钩子（husky）之外的服务端兜底：prettier 检查 + tsc --noEmit + node --test。
+# 服务端兜底（只跑零本地依赖的检查）：prettier 格式 + 版本纪律门。
+# 铁律：CI 永不碰 dsh-check——它是纯本地检测工具（独立存在，不内联进任何包、
+# 不被任何包 import、不发布到任何仓库或 npm），CI 机上没有它，也永远不要有。
+# 完整门禁（tsc --noEmit + node --test 全量，含 dsh-check 各门）在本地跑：
+# husky pre-push + 工作区同级 dsh-check/，这是唯一执行位。
+# format 经 npx 直取 registry prettier，不装本包依赖、不解析 link:，
+# 与本地 `pnpm format:check` 同规则（版本跟 devDependencies.prettier 区间走）。
 "on":
   push:
     branches: [main]
@@ -9,12 +15,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4 # 版本读 package.json 的 packageManager
+        with:
+          fetch-depth: 0 # 版本纪律门要 tag + 完整历史
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm format:check
-      - run: pnpm typecheck
-      - run: pnpm test
+      - name: format 检查（零本地依赖）
+        run: |
+          PV=$(node -p "require('./package.json').devDependencies.prettier")
+          npx -y "prettier@$PV" --check .
+      - name: 版本纪律门（公开包：改了发布内容必须 bump 版本）
+        run: |
+          PKG_VER=$(node -p "require('./package.json').version")
+          LAST_TAG=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
+          if [ -z "$LAST_TAG" ]; then echo "尚无 v* tag，跳过"; exit 0; fi
+          if [ "v$PKG_VER" != "$LAST_TAG" ]; then echo "版本已 bump（$LAST_TAG → $PKG_VER），通过"; exit 0; fi
+          FILES=$(node -p "require('./package.json').files.join(' ')")
+          if git diff --quiet "$LAST_TAG"...HEAD -- $FILES; then
+            echo "发布内容自 $LAST_TAG 无变化，不用 bump，通过"
+          else
+            echo "自 $LAST_TAG 起发布内容有改动，但版本仍是 $PKG_VER：先 bump package.json 再推（打 tag 即发版，见 publish.yml）" >&2
+            git diff --name-only "$LAST_TAG"...HEAD -- $FILES >&2
+            exit 1
+          fi
