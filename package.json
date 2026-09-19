@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-model-governor",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "DSH model governance plane: per-provider RPM queueing line in the Models page (never rejects, only delays) plus OpenCode session-header compat and RPS-ramp RPM probing with auto-apply on topped results. Includes a no-op outcome hook for a future circuit breaker.",
   "keywords": [
